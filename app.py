@@ -196,11 +196,9 @@ def gmail_auth():
     )
 
     flow.redirect_uri = "https://my-portfolio-bot-test-2.onrender.com/gmail/callback"
-
     authorization_url, state = flow.authorization_url(
         access_type="offline",
-        include_granted_scopes="true",
-        prompt="consent"
+        include_granted_scopes="true"
     )
 
     return {
