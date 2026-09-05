@@ -1,14 +1,20 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from groq import Groq
 import os
-import base64
+
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 
+
 app = FastAPI()
+
+
+# =============================
+# CORS
+# =============================
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,6 +23,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # =============================
 # API KEYS
@@ -29,10 +36,12 @@ client = Groq(api_key=GROQ_API_KEY)
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
 
+
 GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.compose"
 ]
+
 
 # =============================
 # AI AGENT SETTINGS
@@ -40,11 +49,10 @@ GMAIL_SCOPES = [
 
 agent_enabled = True
 
-# Stores OAuth PKCE verifiers temporarily
-oauth_states = {}
 
-# Stores Gmail credentials while server is running
+# Stores Gmail credentials while the server is running
 gmail_credentials = None
+
 
 # =============================
 # AI SYSTEM INSTRUCTION
@@ -124,6 +132,7 @@ Avoid generic openings and repetitive phrases.
 The response should feel human, relevant, and natural.
 """
 
+
 # =============================
 # CHAT MODEL
 # =============================
@@ -138,6 +147,7 @@ class ChatRequest(BaseModel):
 # =============================
 
 def get_gmail_service():
+
     if gmail_credentials is None:
         return None
 
@@ -153,7 +163,7 @@ def get_gmail_service():
 # =============================
 
 @app.get("/gmail/auth")
-def gmail_auth():
+def gmail_auth(response: Response):
 
     flow = Flow.from_client_config(
         {
@@ -176,17 +186,59 @@ def gmail_auth():
         include_granted_scopes="true"
     )
 
-    oauth_states[state] = flow.code_verifier
+    # Store OAuth state and PKCE verifier in a secure browser cookie.
+    # This survives Render restarts because the data is stored in the browser.
+    response.set_cookie(
+        key="oauth_state",
+        value=state,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=600
+    )
+
+    response.set_cookie(
+        key="oauth_verifier",
+        value=flow.code_verifier,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=600
+    )
 
     return {
         "authorization_url": authorization_url
     }
 
 
+# =============================
+# GMAIL CALLBACK
+# =============================
+
 @app.get("/gmail/callback")
-def gmail_callback(code: str, state: str):
+def gmail_callback(
+    request: Request,
+    response: Response,
+    code: str,
+    state: str
+):
 
     global gmail_credentials
+
+    # Get the saved OAuth information from the browser cookies.
+    saved_state = request.cookies.get("oauth_state")
+    code_verifier = request.cookies.get("oauth_verifier")
+
+    # Check that the returned state matches the state we created.
+    if not saved_state or saved_state != state:
+        return {
+            "error": "OAuth session expired or invalid state"
+        }
+
+    if not code_verifier:
+        return {
+            "error": "OAuth code verifier missing"
+        }
 
     flow = Flow.from_client_config(
         {
@@ -204,23 +256,34 @@ def gmail_callback(code: str, state: str):
         "https://my-portfolio-bot-test-2.onrender.com/gmail/callback"
     )
 
-    code_verifier = oauth_states.pop(state, None)
-
-    if not code_verifier:
-        return {
-            "error": "OAuth session expired or invalid state"
-        }
-
+    # Restore the PKCE verifier.
     flow.code_verifier = code_verifier
 
+    # Exchange Google's authorization code for Gmail credentials.
     flow.fetch_token(code=code)
 
     gmail_credentials = flow.credentials
 
-    # Return to the control panel
-    return RedirectResponse(
+    # Delete the temporary OAuth cookies.
+    redirect = RedirectResponse(
         url="https://email-agent-panel.onrender.com/"
     )
+
+    redirect.delete_cookie(
+        key="oauth_state",
+        httponly=True,
+        secure=True,
+        samesite="lax"
+    )
+
+    redirect.delete_cookie(
+        key="oauth_verifier",
+        httponly=True,
+        secure=True,
+        samesite="lax"
+    )
+
+    return redirect
 
 
 # =============================
@@ -252,7 +315,8 @@ def get_emails():
 
     results = service.users().messages().list(
         userId="me",
-        maxResults=10
+        maxResults=10,
+        labelIds=["INBOX"]
     ).execute()
 
     messages = results.get("messages", [])
@@ -308,7 +372,8 @@ def get_emails():
             "from": sender,
             "to": recipient,
             "subject": subject,
-            "date": date
+            "date": date,
+            "snippet": data.get("snippet", "")
         })
 
     return {
@@ -404,9 +469,9 @@ def chat(request: ChatRequest):
         max_completion_tokens=1024,
     )
 
-    response = completion.choices[0].message.content
+    response_text = completion.choices[0].message.content
 
     return {
-        "response": response,
+        "response": response_text,
         "agent_enabled": True
     }
