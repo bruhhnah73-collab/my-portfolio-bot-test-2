@@ -660,6 +660,128 @@ def filter_email(email_id: str):
 
     if classification not in ["PROCESS", "IGNORE"]:
         classification = "IGNORE"
+        # =============================
+# FILTER ALL INBOX EMAILS
+# =============================
+
+@app.get("/gmail/filtered-emails")
+def get_filtered_emails():
+
+    service = get_gmail_service()
+
+    if service is None:
+        return {
+            "connected": False,
+            "emails": []
+        }
+
+    results = service.users().messages().list(
+        userId="me",
+        maxResults=10,
+        labelIds=["INBOX"]
+    ).execute()
+
+    messages = results.get("messages", [])
+
+    filtered_emails = []
+
+    for message in messages:
+
+        email_id = message["id"]
+
+        data = service.users().messages().get(
+            userId="me",
+            id=email_id,
+            format="full"
+        ).execute()
+
+        payload = data.get("payload", {})
+        headers = payload.get("headers", [])
+
+        sender = ""
+        subject = ""
+
+        for header in headers:
+
+            name = header["name"].lower()
+            value = header["value"]
+
+            if name == "from":
+                sender = value
+
+            elif name == "subject":
+                subject = value
+
+        snippet = data.get("snippet", "")
+
+        text = f"""
+        From: {sender}
+        Subject: {subject}
+        Email preview: {snippet}
+        """
+
+        completion = client.chat.completions.create(
+            model="openai/gpt-oss-20b",
+            messages=[
+                {
+                    "role": "system",
+                    "content": """
+                    Classify an email for an AI email assistant.
+
+                    Return ONLY one of these two words:
+
+                    PROCESS
+                    IGNORE
+
+                    PROCESS:
+                    - Genuine personal or professional messages
+                    - Questions about the creator's portfolio or projects
+                    - Messages that appear to require a personal response
+
+                    IGNORE:
+                    - Newsletters
+                    - Marketing emails
+                    - Promotional emails
+                    - Verification codes
+                    - Security alerts
+                    - Password reset emails
+                    - Automated notifications
+                    - Spam
+                    - Mass emails
+
+                    If uncertain, choose IGNORE.
+                    """
+                },
+                {
+                    "role": "user",
+                    "content": text
+                }
+            ],
+            temperature=0,
+            max_completion_tokens=10
+        )
+
+        classification = (
+            completion.choices[0].message.content
+            .strip()
+            .upper()
+        )
+
+        if classification not in ["PROCESS", "IGNORE"]:
+            classification = "IGNORE"
+
+        filtered_emails.append({
+            "id": email_id,
+            "from": sender,
+            "subject": subject,
+            "snippet": snippet,
+            "classification": classification
+        })
+
+    return {
+        "connected": True,
+        "emails": filtered_emails
+    }
 
     return {
         "email_id": email_id,
