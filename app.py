@@ -1,9 +1,11 @@
+```python
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from groq import Groq
 import os
+import base64
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 
@@ -42,7 +44,7 @@ agent_enabled = True
 # Stores OAuth PKCE verifiers temporarily
 oauth_states = {}
 
-# Stores Gmail credentials while the server is running
+# Stores Gmail credentials while server is running
 gmail_credentials = None
 
 # =============================
@@ -133,6 +135,21 @@ class ChatRequest(BaseModel):
 
 
 # =============================
+# GMAIL HELPER
+# =============================
+
+def get_gmail_service():
+    if gmail_credentials is None:
+        return None
+
+    return build(
+        "gmail",
+        "v1",
+        credentials=gmail_credentials
+    )
+
+
+# =============================
 # GMAIL OAUTH
 # =============================
 
@@ -201,7 +218,7 @@ def gmail_callback(code: str, state: str):
 
     gmail_credentials = flow.credentials
 
-    # Send the user back to the control panel
+    # Return to the control panel
     return RedirectResponse(
         url="https://email-agent-panel.onrender.com/"
     )
@@ -216,6 +233,88 @@ def gmail_status():
 
     return {
         "connected": gmail_credentials is not None
+    }
+
+
+# =============================
+# GMAIL INBOX
+# =============================
+
+@app.get("/gmail/emails")
+def get_emails():
+
+    service = get_gmail_service()
+
+    if service is None:
+        return {
+            "connected": False,
+            "emails": []
+        }
+
+    results = service.users().messages().list(
+        userId="me",
+        maxResults=10
+    ).execute()
+
+    messages = results.get("messages", [])
+
+    emails = []
+
+    for message in messages:
+
+        data = service.users().messages().get(
+            userId="me",
+            id=message["id"],
+            format="metadata",
+            metadataHeaders=[
+                "From",
+                "To",
+                "Subject",
+                "Date"
+            ]
+        ).execute()
+
+        headers = data.get(
+            "payload",
+            {}
+        ).get(
+            "headers",
+            []
+        )
+
+        sender = ""
+        recipient = ""
+        subject = ""
+        date = ""
+
+        for header in headers:
+
+            name = header["name"].lower()
+            value = header["value"]
+
+            if name == "from":
+                sender = value
+
+            elif name == "to":
+                recipient = value
+
+            elif name == "subject":
+                subject = value
+
+            elif name == "date":
+                date = value
+
+        emails.append({
+            "id": message["id"],
+            "from": sender,
+            "to": recipient,
+            "subject": subject,
+            "date": date
+        })
+
+    return {
+        "connected": True,
+        "emails": emails
     }
 
 
@@ -312,3 +411,4 @@ def chat(request: ChatRequest):
         "response": response,
         "agent_enabled": True
     }
+```
