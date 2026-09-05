@@ -12,11 +12,6 @@ from googleapiclient.discovery import build
 
 app = FastAPI()
 
-
-# =============================
-# CORS
-# =============================
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -26,132 +21,71 @@ app.add_middleware(
 )
 
 
-# =============================
+# =========================
 # API KEYS
-# =============================
+# =========================
 
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
 
 client = Groq(api_key=GROQ_API_KEY)
 
-GOOGLE_CLIENT_ID = os.environ.get(
-    "GOOGLE_CLIENT_ID",
-    ""
-).strip()
 
-GOOGLE_CLIENT_SECRET = os.environ.get(
-    "GOOGLE_CLIENT_SECRET",
-    ""
-).strip()
-
+# =========================
+# GMAIL
+# =========================
 
 GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.compose"
 ]
 
-
-# =============================
-# AI AGENT SETTINGS
-# =============================
-
+gmail_credentials = None
 agent_enabled = True
 
-# Gmail credentials are stored while the server is running.
-gmail_credentials = None
 
-
-# =============================
-# AI SYSTEM INSTRUCTION
-# =============================
+# =========================
+# CHAT
+# =========================
 
 SYSTEM_INSTRUCTION = """
 You are an AI assistant representing the creator of this portfolio.
 
-Your most important goal is to communicate naturally, like a real helpful
-person having a normal conversation.
+The creator builds and experiments with AI, web development, and technology.
 
-Do NOT sound robotic, overly formal, repetitive, or like you are reading
-from a script.
-
-NATURAL CONVERSATION:
-- Respond naturally to what the person actually said.
-- Pay attention to conversation history.
-- Do not repeat information unnecessarily.
-- Keep replies conversational and easy to read.
-- Use casual language when the conversation is casual.
-- Be polite and professional when the situation is professional.
-- Do not turn every response into a long explanation.
-- Ask a natural follow-up question when it makes sense.
-- If a short answer is enough, keep it short.
-- Avoid phrases like "As an AI language model" unless absolutely necessary.
-- Do not force emojis into every message.
-
-ABOUT THE CREATOR:
-
-The creator is a student who builds and experiments with AI, web
-development, and technology projects.
-
-Their portfolio includes:
+Projects:
 
 1. School Admin Dashboard - 2026
-   Built using Replit.
-   A functional administrative login portal and dashboard data interface.
+Built using Replit.
+A functional administrative login portal and dashboard data interface.
 
 2. School Landing Page - 2026
-   Built using Visual Studio Code.
-   A clean, fully responsive multi-page website built for a real school.
+Built using Visual Studio Code.
+A clean, fully responsive multi-page website built for a real school.
 
 3. My First AI Chatbox - 2026
-   Built using Ziper AI.
-   An AI chatbox that provides information about the portfolio website
-   and the creator's projects.
+Built using Ziper AI.
+An AI chatbox that provides information about the portfolio and projects.
 
 4. Custom Python AI Chatbot
-   Built using Python, Streamlit, and Visual Studio Code.
-   A custom portfolio assistant featuring real-time response streaming.
+Built using Python, Streamlit, and Visual Studio Code.
+A custom portfolio assistant featuring real-time response streaming.
 
-IMPORTANT:
-- Never invent facts about the creator.
-- Only state information explicitly provided.
-- Never assume that a technology mentioned in a project means the creator
-  is skilled or experienced with it.
-- Never add features, achievements, tools, or experiences that aren't
-  explicitly mentioned.
-- If information isn't provided, say:
-  "I don't have that information in the project details I was given."
+Never invent information about the creator.
 
-EMAIL CONVERSATIONS:
-
-When helping with emails, understand the context before responding.
-Write replies that sound like something a real person would actually send.
-
-Match the tone of the incoming message:
-- Friendly message → friendly response.
-- Professional message → professional response.
-- Simple question → simple answer.
-- Detailed message → respond to the important points without unnecessary
-  filler.
-
-Do not use the same response structure every time.
-Avoid generic openings and repetitive phrases.
-
-The response should feel human, relevant, and natural.
+Respond naturally and conversationally.
 """
 
-
-# =============================
-# CHAT MODEL
-# =============================
 
 class ChatRequest(BaseModel):
     message: str
     conversation: list[dict] = []
 
 
-# =============================
-# GMAIL HELPER
-# =============================
+# =========================
+# GMAIL SERVICE
+# =========================
 
 def get_gmail_service():
 
@@ -165,9 +99,9 @@ def get_gmail_service():
     )
 
 
-# =============================
-# GMAIL OAUTH
-# =============================
+# =========================
+# GMAIL AUTH
+# =========================
 
 @app.get("/gmail/auth")
 def gmail_auth(response: Response):
@@ -178,7 +112,7 @@ def gmail_auth(response: Response):
                 "client_id": GOOGLE_CLIENT_ID,
                 "client_secret": GOOGLE_CLIENT_SECRET,
                 "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token",
+                "token_uri": "https://oauth2.googleapis.com/token"
             }
         },
         scopes=GMAIL_SCOPES
@@ -216,14 +150,13 @@ def gmail_auth(response: Response):
     }
 
 
-# =============================
+# =========================
 # GMAIL CALLBACK
-# =============================
+# =========================
 
 @app.get("/gmail/callback")
 def gmail_callback(
     request: Request,
-    response: Response,
     code: str,
     state: str
 ):
@@ -234,14 +167,10 @@ def gmail_callback(
     code_verifier = request.cookies.get("oauth_verifier")
 
     if not saved_state or saved_state != state:
-        return {
-            "error": "OAuth session expired or invalid state"
-        }
+        return {"error": "Invalid OAuth state"}
 
     if not code_verifier:
-        return {
-            "error": "OAuth code verifier missing"
-        }
+        return {"error": "Missing OAuth code verifier"}
 
     flow = Flow.from_client_config(
         {
@@ -249,7 +178,7 @@ def gmail_callback(
                 "client_id": GOOGLE_CLIENT_ID,
                 "client_secret": GOOGLE_CLIENT_SECRET,
                 "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token",
+                "token_uri": "https://oauth2.googleapis.com/token"
             }
         },
         scopes=GMAIL_SCOPES
@@ -269,26 +198,15 @@ def gmail_callback(
         url="https://email-agent-panel.onrender.com/"
     )
 
-    redirect.delete_cookie(
-        key="oauth_state",
-        httponly=True,
-        secure=True,
-        samesite="lax"
-    )
-
-    redirect.delete_cookie(
-        key="oauth_verifier",
-        httponly=True,
-        secure=True,
-        samesite="lax"
-    )
+    redirect.delete_cookie("oauth_state")
+    redirect.delete_cookie("oauth_verifier")
 
     return redirect
 
 
-# =============================
+# =========================
 # GMAIL STATUS
-# =============================
+# =========================
 
 @app.get("/gmail/status")
 def gmail_status():
@@ -298,9 +216,9 @@ def gmail_status():
     }
 
 
-# =============================
-# GMAIL INBOX
-# =============================
+# =========================
+# GET INBOX
+# =========================
 
 @app.get("/gmail/emails")
 def get_emails():
@@ -337,13 +255,7 @@ def get_emails():
             ]
         ).execute()
 
-        headers = data.get(
-            "payload",
-            {}
-        ).get(
-            "headers",
-            []
-        )
+        headers = data.get("payload", {}).get("headers", [])
 
         sender = ""
         recipient = ""
@@ -353,19 +265,18 @@ def get_emails():
         for header in headers:
 
             name = header["name"].lower()
-            value = header["value"]
 
             if name == "from":
-                sender = value
+                sender = header["value"]
 
             elif name == "to":
-                recipient = value
+                recipient = header["value"]
 
             elif name == "subject":
-                subject = value
+                subject = header["value"]
 
             elif name == "date":
-                date = value
+                date = header["value"]
 
         emails.append({
             "id": message["id"],
@@ -382,9 +293,9 @@ def get_emails():
     }
 
 
-# =============================
-# READ FULL GMAIL EMAIL
-# =============================
+# =========================
+# GET ONE EMAIL
+# =========================
 
 @app.get("/gmail/email/{email_id}")
 def get_email(email_id: str):
@@ -393,8 +304,7 @@ def get_email(email_id: str):
 
     if service is None:
         return {
-            "connected": False,
-            "error": "Gmail is not connected"
+            "connected": False
         }
 
     data = service.users().messages().get(
@@ -414,19 +324,18 @@ def get_email(email_id: str):
     for header in headers:
 
         name = header["name"].lower()
-        value = header["value"]
 
         if name == "from":
-            sender = value
+            sender = header["value"]
 
         elif name == "to":
-            recipient = value
+            recipient = header["value"]
 
         elif name == "subject":
-            subject = value
+            subject = header["value"]
 
         elif name == "date":
-            date = value
+            date = header["value"]
 
     body = ""
 
@@ -436,13 +345,9 @@ def get_email(email_id: str):
 
             if part.get("mimeType") == "text/plain":
 
-                body_data = part.get(
-                    "body",
-                    {}
-                ).get("data")
+                body_data = part.get("body", {}).get("data")
 
                 if body_data:
-
                     body = base64.urlsafe_b64decode(
                         body_data
                     ).decode(
@@ -454,10 +359,7 @@ def get_email(email_id: str):
 
     else:
 
-        body_data = payload.get(
-            "body",
-            {}
-        ).get("data")
+        body_data = payload.get("body", {}).get("data")
 
         if body_data:
 
@@ -481,9 +383,9 @@ def get_email(email_id: str):
     }
 
 
-# =============================
+# =========================
 # HOME
-# =============================
+# =========================
 
 @app.get("/")
 def home():
@@ -494,35 +396,41 @@ def home():
     }
 
 
-# =============================
-# AGENT ON/OFF
-# =============================
+# =========================
+# AGENT ON
+# =========================
 
 @app.post("/agent/on")
-def turn_agent_on():
+def agent_on():
 
     global agent_enabled
 
     agent_enabled = True
 
     return {
-        "agent_enabled": True,
-        "message": "AI agent is ON"
+        "agent_enabled": True
     }
 
 
+# =========================
+# AGENT OFF
+# =========================
+
 @app.post("/agent/off")
-def turn_agent_off():
+def agent_off():
 
     global agent_enabled
 
     agent_enabled = False
 
     return {
-        "agent_enabled": False,
-        "message": "AI agent is OFF"
+        "agent_enabled": False
     }
 
+
+# =========================
+# AGENT STATUS
+# =========================
 
 @app.get("/agent/status")
 def agent_status():
@@ -532,9 +440,9 @@ def agent_status():
     }
 
 
-# =============================
-# AI CHAT
-# =============================
+# =========================
+# CHAT
+# =========================
 
 @app.post("/chat")
 def chat(request: ChatRequest):
@@ -543,8 +451,7 @@ def chat(request: ChatRequest):
 
         return {
             "response": None,
-            "agent_enabled": False,
-            "message": "AI agent is currently OFF"
+            "agent_enabled": False
         }
 
     messages = [
@@ -565,112 +472,164 @@ def chat(request: ChatRequest):
         model="openai/gpt-oss-20b",
         messages=messages,
         temperature=0.6,
-        max_completion_tokens=1024,
+        max_completion_tokens=1024
     )
 
-    response_text = completion.choices[0].message.content
-
     return {
-        "response": response_text,
+        "response": completion.choices[0].message.content,
         "agent_enabled": True
     }
 
 
-# =============================
-# EMAIL CLASSIFICATION
-# =============================
-
-EMAIL_FILTER_INSTRUCTION = """
-You are an email classification system.
-
-Your job is to decide whether an email should be handled by a personal
-AI email assistant.
-
-Return ONLY one word:
-
-PROCESS
-or
-IGNORE
-
-PROCESS means the email appears to be a genuine message from a person
-that deserves a personal response.
-
-Examples of PROCESS:
-- Someone asking about the creator's portfolio
-- Someone asking what projects the creator has built
-- Someone asking about the creator's work
-- Someone asking a genuine question
-- A person contacting the creator about a possible project
-- A normal conversation between people
-- A professional inquiry that appears to need a response
-- A friend or individual sending a normal personal message
-
-IGNORE means the email is automated, promotional, or does not need a
-personal response.
-
-Examples of IGNORE:
-- Verification codes
-- Login codes
-- Security alerts
-- Password reset emails
-- Account confirmation emails
-- Automated GitHub/GitLab/Render notifications
-- Automated service notifications
-- Newsletters
-- Marketing emails
-- Promotional campaigns
-- Mass emails
-- Spam
-- Streaming notifications
-- System-generated emails
-
-IMPORTANT:
-
-A normal email from a real person should generally be PROCESS.
-
-If the email contains a genuine question or conversation and there is
-no clear sign that it is automated or promotional, choose PROCESS.
-
-Do NOT choose IGNORE simply because the sender is unfamiliar.
-
-When uncertain between a genuine human message and an automated message,
-look at the wording, sender, subject, and content carefully.
-
-Return ONLY:
-PROCESS
-or
-IGNORE
-"""
-
+# =========================
+# EMAIL CLASSIFIER
+# =========================
 
 def classify_email(sender, subject, snippet):
 
-    text = f"""
-From: {sender}
+    sender = sender.lower()
+    subject = subject.lower()
+    snippet = snippet.lower()
 
-Subject: {subject}
+    text = f"{sender} {subject} {snippet}"
 
-Email content:
-{snippet}
-"""
+
+    # DEFINITELY IGNORE AUTOMATED EMAILS
+
+    ignore_words = [
+        "verification code",
+        "authentication code",
+        "sudo authentication",
+        "sudo email verification",
+        "password reset",
+        "reset your password",
+        "security alert",
+        "verify your identity",
+        "confirm your email",
+        "confirm your account",
+        "account verification",
+        "login code",
+        "one-time password",
+        "unsubscribe",
+        "newsletter",
+        "deploy failed",
+        "deploy succeeded",
+        "is live:",
+        "streaming",
+        "third-party oauth",
+        "oauth application"
+    ]
+
+    for word in ignore_words:
+
+        if word in text:
+            return "IGNORE"
+
+
+    # DEFINITELY PROCESS PORTFOLIO QUESTIONS
+
+    portfolio_words = [
+        "portfolio",
+        "projects",
+        "project",
+        "developer",
+        "website",
+        "built",
+        "worked on",
+        "your work"
+    ]
+
+    question_words = [
+        "?",
+        "what",
+        "which",
+        "how",
+        "can you",
+        "could you",
+        "tell me",
+        "would you"
+    ]
+
+    has_portfolio_topic = any(
+        word in text
+        for word in portfolio_words
+    )
+
+    has_question = any(
+        word in text
+        for word in question_words
+    )
+
+    if has_portfolio_topic and has_question:
+        return "PROCESS"
+
+
+    # AI CLASSIFICATION
 
     completion = client.chat.completions.create(
         model="openai/gpt-oss-20b",
         messages=[
             {
                 "role": "system",
-                "content": EMAIL_FILTER_INSTRUCTION
+                "content": """
+Classify this email.
+
+Return ONLY:
+
+PROCESS
+or
+IGNORE
+
+PROCESS:
+- Genuine message from a person
+- Personal conversation
+- Professional inquiry
+- Genuine question
+- Project inquiry
+- Collaboration inquiry
+- Portfolio question
+- Someone expecting a personal response
+
+IGNORE:
+- Automated emails
+- Verification emails
+- Security emails
+- Password emails
+- Login codes
+- Account confirmation
+- GitHub notifications
+- GitLab notifications
+- Render notifications
+- Streaming notifications
+- Newsletters
+- Marketing
+- Promotions
+- Spam
+- Mass emails
+
+If a real person appears to be contacting the creator and expects a
+response, choose PROCESS.
+
+Return ONLY PROCESS or IGNORE.
+"""
             },
             {
                 "role": "user",
-                "content": text
+                "content": f"""
+From: {sender}
+
+Subject: {subject}
+
+Email:
+{snippet}
+"""
             }
         ],
         temperature=0,
         max_completion_tokens=10
     )
 
-    classification = (
+    result = (
         completion.choices[0]
         .message
         .content
@@ -678,18 +637,15 @@ Email content:
         .upper()
     )
 
-    if classification not in [
-        "PROCESS",
-        "IGNORE"
-    ]:
-        classification = "IGNORE"
+    if result == "PROCESS":
+        return "PROCESS"
 
-    return classification
+    return "IGNORE"
 
 
-# =============================
+# =========================
 # FILTER ONE EMAIL
-# =============================
+# =========================
 
 @app.post("/gmail/filter/{email_id}")
 def filter_email(email_id: str):
@@ -698,8 +654,7 @@ def filter_email(email_id: str):
 
     if service is None:
         return {
-            "connected": False,
-            "error": "Gmail is not connected"
+            "connected": False
         }
 
     data = service.users().messages().get(
@@ -708,8 +663,13 @@ def filter_email(email_id: str):
         format="full"
     ).execute()
 
-    payload = data.get("payload", {})
-    headers = payload.get("headers", [])
+    headers = data.get(
+        "payload",
+        {}
+    ).get(
+        "headers",
+        []
+    )
 
     sender = ""
     subject = ""
@@ -717,15 +677,17 @@ def filter_email(email_id: str):
     for header in headers:
 
         name = header["name"].lower()
-        value = header["value"]
 
         if name == "from":
-            sender = value
+            sender = header["value"]
 
         elif name == "subject":
-            subject = value
+            subject = header["value"]
 
-    snippet = data.get("snippet", "")
+    snippet = data.get(
+        "snippet",
+        ""
+    )
 
     classification = classify_email(
         sender,
@@ -739,12 +701,12 @@ def filter_email(email_id: str):
     }
 
 
-# =============================
-# FILTER ALL INBOX EMAILS
-# =============================
+# =========================
+# FILTER ALL EMAILS
+# =========================
 
 @app.get("/gmail/filtered-emails")
-def get_filtered_emails():
+def filtered_emails():
 
     service = get_gmail_service()
 
@@ -765,7 +727,7 @@ def get_filtered_emails():
         []
     )
 
-    filtered_emails = []
+    emails = []
 
     for message in messages:
 
@@ -777,12 +739,10 @@ def get_filtered_emails():
             format="full"
         ).execute()
 
-        payload = data.get(
+        headers = data.get(
             "payload",
             {}
-        )
-
-        headers = payload.get(
+        ).get(
             "headers",
             []
         )
@@ -793,13 +753,12 @@ def get_filtered_emails():
         for header in headers:
 
             name = header["name"].lower()
-            value = header["value"]
 
             if name == "from":
-                sender = value
+                sender = header["value"]
 
             elif name == "subject":
-                subject = value
+                subject = header["value"]
 
         snippet = data.get(
             "snippet",
@@ -812,7 +771,7 @@ def get_filtered_emails():
             snippet
         )
 
-        filtered_emails.append({
+        emails.append({
             "id": email_id,
             "from": sender,
             "subject": subject,
@@ -822,5 +781,5 @@ def get_filtered_emails():
 
     return {
         "connected": True,
-        "emails": filtered_emails
+        "emails": emails
     }
