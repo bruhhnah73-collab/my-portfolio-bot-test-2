@@ -88,9 +88,11 @@ Respond naturally and conversationally.
 class ChatRequest(BaseModel):
     message: str
     conversation: list[dict] = []
-    
+
+
 class SendEmailRequest(BaseModel):
     draft: str
+
 
 # =========================
 # GMAIL SERVICE
@@ -532,7 +534,6 @@ def classify_email(sender, subject, snippet):
 
     text = f"{sender} {subject} {snippet}"
 
-
     # AUTOMATED EMAILS
 
     ignore_words = [
@@ -563,7 +564,6 @@ def classify_email(sender, subject, snippet):
 
         if word in text:
             return "IGNORE"
-
 
     # PORTFOLIO QUESTIONS
 
@@ -601,7 +601,6 @@ def classify_email(sender, subject, snippet):
 
     if has_portfolio_topic and has_question:
         return "PROCESS"
-
 
     # AI CLASSIFIER
 
@@ -868,7 +867,6 @@ def generate_email_draft(email_id: str):
         elif name == "subject":
             subject = header["value"]
 
-
     # GET EMAIL BODY
 
     body = ""
@@ -910,7 +908,6 @@ def generate_email_draft(email_id: str):
                 "utf-8",
                 errors="ignore"
             )
-
 
     # GENERATE AI REPLY
 
@@ -987,10 +984,19 @@ Email:
         "draft": draft
     }
 
+
+# =========================
+# SEND EMAIL REPLY
+# =========================
+
 @app.post("/gmail/send/{email_id}")
-def send_gmail_reply(email_id: str, request: SendEmailRequest):
+def send_gmail_reply(
+    email_id: str,
+    request: SendEmailRequest
+):
 
     draft = request.draft
+
     if not gmail_credentials:
         return {
             "success": False,
@@ -998,6 +1004,7 @@ def send_gmail_reply(email_id: str, request: SendEmailRequest):
         }
 
     try:
+
         service = get_gmail_service()
 
         original = service.users().messages().get(
@@ -1007,12 +1014,19 @@ def send_gmail_reply(email_id: str, request: SendEmailRequest):
             metadataHeaders=["From", "Subject"]
         ).execute()
 
-        headers = original.get("payload", {}).get("headers", [])
+        headers = original.get(
+            "payload",
+            {}
+        ).get(
+            "headers",
+            []
+        )
 
         sender = ""
         subject = ""
 
         for header in headers:
+
             if header["name"].lower() == "from":
                 sender = header["value"]
 
@@ -1034,21 +1048,27 @@ def send_gmail_reply(email_id: str, request: SendEmailRequest):
         if not subject.lower().startswith("re:"):
             subject = f"Re: {subject}"
 
-       html_draft = (
-    draft
-    .replace("&", "&amp;")
-    .replace("<", "&lt;")
-    .replace(">", "&gt;")
-    .replace("\n", "<br>")
-)
+        # CONVERT MARKDOWN BOLD TO HTML BOLD
 
-html_draft = re.sub(
-    r"\*\*(.*?)\*\*",
-    r"<strong>\1</strong>",
-    html_draft
-)
+        html_draft = (
+            draft
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\n", "<br>")
+        )
 
-message = MIMEText(html_draft, "html")
+        html_draft = re.sub(
+            r"\*\*(.*?)\*\*",
+            r"<strong>\1</strong>",
+            html_draft
+        )
+
+        message = MIMEText(
+            html_draft,
+            "html"
+        )
+
         message["To"] = sender
         message["Subject"] = subject
 
@@ -1074,10 +1094,10 @@ message = MIMEText(html_draft, "html")
         }
 
     except Exception as e:
+
         print("Gmail send error:", e)
 
         return {
             "success": False,
             "message": "Failed to send the email."
         }
-     
