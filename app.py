@@ -6,6 +6,7 @@ from groq import Groq
 from email.mime.text import MIMEText
 import os
 import base64
+import re
 
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
