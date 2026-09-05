@@ -569,3 +569,99 @@ def chat(request: ChatRequest):
         "response": response_text,
         "agent_enabled": True
     }
+# =============================
+# EMAIL FILTER
+# =============================
+
+@app.post("/gmail/filter/{email_id}")
+def filter_email(email_id: str):
+
+    service = get_gmail_service()
+
+    if service is None:
+        return {
+            "connected": False,
+            "error": "Gmail is not connected"
+        }
+
+    data = service.users().messages().get(
+        userId="me",
+        id=email_id,
+        format="full"
+    ).execute()
+
+    payload = data.get("payload", {})
+    headers = payload.get("headers", [])
+
+    sender = ""
+    subject = ""
+
+    for header in headers:
+
+        name = header["name"].lower()
+        value = header["value"]
+
+        if name == "from":
+            sender = value
+
+        elif name == "subject":
+            subject = value
+
+    snippet = data.get("snippet", "")
+
+    text = f"""
+    From: {sender}
+    Subject: {subject}
+    Email preview: {snippet}
+    """
+
+    completion = client.chat.completions.create(
+        model="openai/gpt-oss-20b",
+        messages=[
+            {
+                "role": "system",
+                "content": """
+                Classify an email for an AI email assistant.
+
+                Return ONLY one of these two words:
+
+                PROCESS
+                IGNORE
+
+                PROCESS:
+                - Genuine personal or professional messages
+                - Questions about the creator's portfolio or projects
+                - Messages that appear to require a personal response
+
+                IGNORE:
+                - Newsletters
+                - Marketing emails
+                - Promotional emails
+                - Verification codes
+                - Security alerts
+                - Password reset emails
+                - Automated notifications
+                - Spam
+                - Mass emails
+
+                If uncertain, choose IGNORE.
+                """
+            },
+            {
+                "role": "user",
+                "content": text
+            }
+        ],
+        temperature=0,
+        max_completion_tokens=10
+    )
+
+    classification = completion.choices[0].message.content.strip().upper()
+
+    if classification not in ["PROCESS", "IGNORE"]:
+        classification = "IGNORE"
+
+    return {
+        "email_id": email_id,
+        "classification": classification
+    }
