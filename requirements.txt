@@ -1,3 +1,5 @@
 fastapi
 uvicorn
 groq
+google-auth
+google-auth-oauthlib
