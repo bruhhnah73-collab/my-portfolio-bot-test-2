@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from groq import Groq
 import os
@@ -40,6 +41,13 @@ agent_enabled = True
 # Stores OAuth PKCE verifiers temporarily
 oauth_states = {}
 
+# Stores Gmail credentials while the server is running
+gmail_credentials = None
+
+# =============================
+# AI SYSTEM INSTRUCTION
+# =============================
+
 SYSTEM_INSTRUCTION = """
 You are an AI assistant representing the creator of this portfolio.
 
@@ -51,13 +59,11 @@ from a script.
 
 NATURAL CONVERSATION:
 - Respond naturally to what the person actually said.
-- Pay attention to the conversation history and remember what has already
-  been discussed.
+- Pay attention to conversation history.
 - Do not repeat information unnecessarily.
 - Keep replies conversational and easy to read.
 - Use casual language when the conversation is casual.
 - Be polite and professional when the situation is professional.
-- Show appropriate personality instead of giving generic AI-sounding replies.
 - Do not turn every response into a long explanation.
 - Ask a natural follow-up question when it makes sense.
 - If a short answer is enough, keep it short.
@@ -90,25 +96,12 @@ Their portfolio includes:
 
 IMPORTANT:
 - Never invent facts about the creator.
-- Only state information that is explicitly provided in this system
-  instruction or in the conversation.
+- Only state information explicitly provided.
 - Never assume that a technology mentioned in a project means the creator
   is skilled or experienced with it.
-- Never add features, capabilities, tools, achievements, or experiences
-  that are not explicitly mentioned.
-- If you don't have enough information to answer something accurately,
-  say so naturally instead of guessing.
-- Do not make promises about the creator.
-- When discussing projects, stay faithful to the descriptions provided.
-- If someone asks about availability or scheduling and no specific
-  information is provided, say that you don't have that information.
-
-PROJECT FACTUAL ACCURACY:
-- Project descriptions are CLOSED information.
-- Do not infer, assume, predict, or create additional project details.
-- If a detail is not explicitly written in the project description, do not
-  mention it.
-- If asked for information that is not provided, say:
+- Never add features, achievements, tools, or experiences that aren't
+  explicitly mentioned.
+- If information isn't provided, say:
   "I don't have that information in the project details I was given."
 
 EMAIL CONVERSATIONS:
@@ -166,7 +159,6 @@ def gmail_auth():
         include_granted_scopes="true"
     )
 
-    # Save the PKCE verifier so the callback can use the same verifier
     oauth_states[state] = flow.code_verifier
 
     return {
@@ -176,6 +168,8 @@ def gmail_auth():
 
 @app.get("/gmail/callback")
 def gmail_callback(code: str, state: str):
+
+    global gmail_credentials
 
     flow = Flow.from_client_config(
         {
@@ -193,7 +187,6 @@ def gmail_callback(code: str, state: str):
         "https://my-portfolio-bot-test-2.onrender.com/gmail/callback"
     )
 
-    # Retrieve and remove the original PKCE verifier
     code_verifier = oauth_states.pop(state, None)
 
     if not code_verifier:
@@ -201,18 +194,27 @@ def gmail_callback(code: str, state: str):
             "error": "OAuth session expired or invalid state"
         }
 
-    # Give the callback the original verifier
     flow.code_verifier = code_verifier
 
-    # Exchange authorization code for credentials
     flow.fetch_token(code=code)
 
-    credentials = flow.credentials
+    gmail_credentials = flow.credentials
 
-    # IMPORTANT:
-    # Do NOT return access tokens or refresh tokens in the browser.
+    # Send the user back to the control panel
+    return RedirectResponse(
+        url="https://email-agent-panel.onrender.com/"
+    )
+
+
+# =============================
+# GMAIL STATUS
+# =============================
+
+@app.get("/gmail/status")
+def gmail_status():
+
     return {
-        "message": "Gmail connected successfully!"
+        "connected": gmail_credentials is not None
     }
 
 
@@ -222,6 +224,7 @@ def gmail_callback(code: str, state: str):
 
 @app.get("/")
 def home():
+
     return {
         "status": "AI agent backend is running!",
         "agent_enabled": agent_enabled
