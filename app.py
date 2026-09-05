@@ -149,4 +149,3 @@ def chat(request: ChatRequest):
         "response": response,
         "agent_enabled": True
     }
-```
