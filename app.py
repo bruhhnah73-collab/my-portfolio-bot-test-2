@@ -381,7 +381,101 @@ def get_emails():
         "emails": emails
     }
 
+# =============================
+# READ FULL GMAIL EMAIL
+# =============================
 
+@app.get("/gmail/email/{email_id}")
+def get_email(email_id: str):
+
+    service = get_gmail_service()
+
+    if service is None:
+        return {
+            "connected": False,
+            "error": "Gmail is not connected"
+        }
+
+    data = service.users().messages().get(
+        userId="me",
+        id=email_id,
+        format="full"
+    ).execute()
+
+    payload = data.get("payload", {})
+
+    headers = payload.get("headers", [])
+
+    sender = ""
+    recipient = ""
+    subject = ""
+    date = ""
+
+    for header in headers:
+
+        name = header["name"].lower()
+        value = header["value"]
+
+        if name == "from":
+            sender = value
+
+        elif name == "to":
+            recipient = value
+
+        elif name == "subject":
+            subject = value
+
+        elif name == "date":
+            date = value
+
+    body = ""
+
+    if "parts" in payload:
+
+        for part in payload["parts"]:
+
+            if part.get("mimeType") == "text/plain":
+
+                body_data = part.get("body", {}).get("data")
+
+                if body_data:
+                    import base64
+
+                    body = base64.urlsafe_b64decode(
+                        body_data
+                    ).decode(
+                        "utf-8",
+                        errors="ignore"
+                    )
+
+                break
+
+    else:
+
+        body_data = payload.get("body", {}).get("data")
+
+        if body_data:
+
+            import base64
+
+            body = base64.urlsafe_b64decode(
+                body_data
+            ).decode(
+                "utf-8",
+                errors="ignore"
+            )
+
+    return {
+        "connected": True,
+        "email": {
+            "id": email_id,
+            "from": sender,
+            "to": recipient,
+            "subject": subject,
+            "date": date,
+            "body": body
+        }
+    }
 # =============================
 # HOME
 # =============================
