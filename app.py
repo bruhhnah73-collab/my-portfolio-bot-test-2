@@ -36,6 +36,7 @@ GMAIL_SCOPES = [
 # True = AI is active
 # False = AI is stopped
 agent_enabled = True
+oauth_states = {}
 
 
 SYSTEM_INSTRUCTION = """
