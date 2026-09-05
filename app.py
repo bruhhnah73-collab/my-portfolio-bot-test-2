@@ -22,8 +22,10 @@ app.add_middleware(
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 client = Groq(api_key=GROQ_API_KEY)
+
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
+
 GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.compose"
@@ -36,6 +38,8 @@ GMAIL_SCOPES = [
 # True = AI is active
 # False = AI is stopped
 agent_enabled = True
+
+# Stores OAuth state -> code verifier
 oauth_states = {}
 
 
@@ -104,28 +108,27 @@ IMPORTANT:
   above.
 - You may speak naturally using "I" when representing the creator, but
   do not claim personal experiences or facts that are not provided.
-  - Treat the project descriptions above as complete.
-- Do not infer additional features, purposes, technologies, or capabilities
-  from those descriptions.
+- Treat the project descriptions above as complete.
+- Do not infer additional features, purposes, technologies, or capabilities.
 - If a detail is not written in the project information above, do not
   mention it as a fact.
 - It is better to give a shorter accurate answer than a longer answer
   containing assumptions.
-  - Natural wording is encouraged, but natural wording must not introduce
+- Natural wording is encouraged, but natural wording must not introduce
   new factual claims.
-  - Never invent the creator's availability, schedule, contact methods,
+- Never invent the creator's availability, schedule, contact methods,
   meeting preferences, or willingness to meet.
 - If someone asks about availability or scheduling and no specific
   information is provided, say that you don't have that information.
-  - When describing a project, do not expand, interpret, or embellish the
+- When describing a project, do not expand, interpret, or embellish the
   project description.
 - Do not mention specific pages, features, design choices, technologies,
   development methods, or purposes unless they are explicitly stated.
 - If someone asks for more detail than the provided project information
   contains, clearly say that the available information is limited.
 
-  PROJECT FACTUAL ACCURACY:
-- Project descriptions are CLOSED information. Treat them as complete.
+PROJECT FACTUAL ACCURACY:
+- Project descriptions are CLOSED information.
 - You are NOT allowed to infer, assume, predict, or create any additional
   details about a project.
 - If a detail is not explicitly written in the project description, you
@@ -134,7 +137,7 @@ IMPORTANT:
   or similar wording to introduce details that were not provided.
 - If asked for details that are not provided, say:
   "I don't have that information in the project details I was given."
-- Being natural or helpful is NEVER a reason to add an unsupported fact.
+
 STRICT PROJECT RULE:
 When answering about a project, copy only the facts explicitly stated in
 that project's description. Do not add, infer, explain, or elaborate on
@@ -147,6 +150,7 @@ Never turn a general statement into specific examples.
 Never describe how something works unless the description explicitly says
 how it works.
 Never claim a feature exists unless the description explicitly says it exists.
+
 ABSOLUTE PROJECT RULE:
 - Only use information explicitly written in the project description.
 - Do not add ANY details that are not explicitly written.
@@ -155,7 +159,7 @@ ABSOLUTE PROJECT RULE:
 - Do not use "for example" or "such as" to create additional project details.
 - If asked for information that is not provided, say:
   "I don't have that information in the project details I was given."
-  
+
 EMAIL CONVERSATIONS:
 
 When helping with emails, understand the context before responding.
@@ -178,12 +182,15 @@ The response should feel human, relevant, and natural.
 class ChatRequest(BaseModel):
     message: str
     conversation: list[dict] = []
+
+
 # =============================
 # GMAIL OAUTH
 # =============================
 
 @app.get("/gmail/auth")
 def gmail_auth():
+
     flow = Flow.from_client_config(
         {
             "web": {
@@ -196,19 +203,27 @@ def gmail_auth():
         scopes=GMAIL_SCOPES
     )
 
-    flow.redirect_uri = "https://my-portfolio-bot-test-2.onrender.com/gmail/callback"
+    flow.redirect_uri = (
+        "https://my-portfolio-bot-test-2.onrender.com/gmail/callback"
+    )
+
     authorization_url, state = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true"
     )
+
+    # Save the PKCE code verifier so the callback can reuse it
     oauth_states[state] = flow.code_verifier
 
     return {
         "authorization_url": authorization_url,
         "state": state
     }
+
+
 @app.get("/gmail/callback")
-def gmail_callback(code: str):
+def gmail_callback(code: str, state: str):
+
     flow = Flow.from_client_config(
         {
             "web": {
@@ -221,7 +236,20 @@ def gmail_callback(code: str):
         scopes=GMAIL_SCOPES
     )
 
-    flow.redirect_uri = "https://my-portfolio-bot-test-2.onrender.com/gmail/callback"
+    flow.redirect_uri = (
+        "https://my-portfolio-bot-test-2.onrender.com/gmail/callback"
+    )
+
+    # Retrieve the code verifier created during /gmail/auth
+    code_verifier = oauth_states.pop(state, None)
+
+    if not code_verifier:
+        return {
+            "error": "OAuth session expired or invalid state"
+        }
+
+    # Give the verifier back to the OAuth flow
+    flow.code_verifier = code_verifier
 
     flow.fetch_token(code=code)
 
@@ -232,6 +260,8 @@ def gmail_callback(code: str):
         "token": credentials.token,
         "refresh_token": credentials.refresh_token
     }
+
+
 # =============================
 # HOME
 # =============================
@@ -250,6 +280,7 @@ def home():
 
 @app.post("/agent/on")
 def turn_agent_on():
+
     global agent_enabled
 
     agent_enabled = True
@@ -266,6 +297,7 @@ def turn_agent_on():
 
 @app.post("/agent/off")
 def turn_agent_off():
+
     global agent_enabled
 
     agent_enabled = False
@@ -282,6 +314,7 @@ def turn_agent_off():
 
 @app.get("/agent/status")
 def agent_status():
+
     return {
         "agent_enabled": agent_enabled
     }
