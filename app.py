@@ -1033,7 +1033,21 @@ def send_gmail_reply(email_id: str, request: SendEmailRequest):
         if not subject.lower().startswith("re:"):
             subject = f"Re: {subject}"
 
-        message = MIMEText(draft)
+       html_draft = (
+    draft
+    .replace("&", "&amp;")
+    .replace("<", "&lt;")
+    .replace(">", "&gt;")
+    .replace("\n", "<br>")
+)
+
+html_draft = re.sub(
+    r"\*\*(.*?)\*\*",
+    r"<strong>\1</strong>",
+    html_draft
+)
+
+message = MIMEText(html_draft, "html")
         message["To"] = sender
         message["Subject"] = subject
 
