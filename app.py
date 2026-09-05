@@ -34,8 +34,15 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 client = Groq(api_key=GROQ_API_KEY)
 
-GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
-GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
+GOOGLE_CLIENT_ID = os.environ.get(
+    "GOOGLE_CLIENT_ID",
+    ""
+).strip()
+
+GOOGLE_CLIENT_SECRET = os.environ.get(
+    "GOOGLE_CLIENT_SECRET",
+    ""
+).strip()
 
 
 GMAIL_SCOPES = [
@@ -50,7 +57,7 @@ GMAIL_SCOPES = [
 
 agent_enabled = True
 
-# Stores Gmail credentials while the server is running
+# Gmail credentials are stored while the server is running.
 gmail_credentials = None
 
 
@@ -429,7 +436,10 @@ def get_email(email_id: str):
 
             if part.get("mimeType") == "text/plain":
 
-                body_data = part.get("body", {}).get("data")
+                body_data = part.get(
+                    "body",
+                    {}
+                ).get("data")
 
                 if body_data:
 
@@ -444,7 +454,10 @@ def get_email(email_id: str):
 
     else:
 
-        body_data = payload.get("body", {}).get("data")
+        body_data = payload.get(
+            "body",
+            {}
+        ).get("data")
 
         if body_data:
 
@@ -564,7 +577,118 @@ def chat(request: ChatRequest):
 
 
 # =============================
-# EMAIL FILTER
+# EMAIL CLASSIFICATION
+# =============================
+
+EMAIL_FILTER_INSTRUCTION = """
+You are an email classification system.
+
+Your job is to decide whether an email should be handled by a personal
+AI email assistant.
+
+Return ONLY one word:
+
+PROCESS
+or
+IGNORE
+
+PROCESS means the email appears to be a genuine message from a person
+that deserves a personal response.
+
+Examples of PROCESS:
+- Someone asking about the creator's portfolio
+- Someone asking what projects the creator has built
+- Someone asking about the creator's work
+- Someone asking a genuine question
+- A person contacting the creator about a possible project
+- A normal conversation between people
+- A professional inquiry that appears to need a response
+- A friend or individual sending a normal personal message
+
+IGNORE means the email is automated, promotional, or does not need a
+personal response.
+
+Examples of IGNORE:
+- Verification codes
+- Login codes
+- Security alerts
+- Password reset emails
+- Account confirmation emails
+- Automated GitHub/GitLab/Render notifications
+- Automated service notifications
+- Newsletters
+- Marketing emails
+- Promotional campaigns
+- Mass emails
+- Spam
+- Streaming notifications
+- System-generated emails
+
+IMPORTANT:
+
+A normal email from a real person should generally be PROCESS.
+
+If the email contains a genuine question or conversation and there is
+no clear sign that it is automated or promotional, choose PROCESS.
+
+Do NOT choose IGNORE simply because the sender is unfamiliar.
+
+When uncertain between a genuine human message and an automated message,
+look at the wording, sender, subject, and content carefully.
+
+Return ONLY:
+PROCESS
+or
+IGNORE
+"""
+
+
+def classify_email(sender, subject, snippet):
+
+    text = f"""
+From: {sender}
+
+Subject: {subject}
+
+Email content:
+{snippet}
+"""
+
+    completion = client.chat.completions.create(
+        model="openai/gpt-oss-20b",
+        messages=[
+            {
+                "role": "system",
+                "content": EMAIL_FILTER_INSTRUCTION
+            },
+            {
+                "role": "user",
+                "content": text
+            }
+        ],
+        temperature=0,
+        max_completion_tokens=10
+    )
+
+    classification = (
+        completion.choices[0]
+        .message
+        .content
+        .strip()
+        .upper()
+    )
+
+    if classification not in [
+        "PROCESS",
+        "IGNORE"
+    ]:
+        classification = "IGNORE"
+
+    return classification
+
+
+# =============================
+# FILTER ONE EMAIL
 # =============================
 
 @app.post("/gmail/filter/{email_id}")
@@ -603,61 +727,11 @@ def filter_email(email_id: str):
 
     snippet = data.get("snippet", "")
 
-    text = f"""
-    From: {sender}
-    Subject: {subject}
-    Email preview: {snippet}
-    """
-
-    completion = client.chat.completions.create(
-        model="openai/gpt-oss-20b",
-        messages=[
-            {
-                "role": "system",
-                "content": """
-                Classify an email for an AI email assistant.
-
-                Return ONLY one of these two words:
-
-                PROCESS
-                IGNORE
-
-                PROCESS:
-                - Genuine personal or professional messages
-                - Questions about the creator's portfolio or projects
-                - Messages that appear to require a personal response
-
-                IGNORE:
-                - Newsletters
-                - Marketing emails
-                - Promotional emails
-                - Verification codes
-                - Security alerts
-                - Password reset emails
-                - Automated notifications
-                - Spam
-                - Mass emails
-
-                If uncertain, choose IGNORE.
-                """
-            },
-            {
-                "role": "user",
-                "content": text
-            }
-        ],
-        temperature=0,
-        max_completion_tokens=10
+    classification = classify_email(
+        sender,
+        subject,
+        snippet
     )
-
-    classification = (
-        completion.choices[0].message.content
-        .strip()
-        .upper()
-    )
-
-    if classification not in ["PROCESS", "IGNORE"]:
-        classification = "IGNORE"
 
     return {
         "email_id": email_id,
@@ -686,7 +760,10 @@ def get_filtered_emails():
         labelIds=["INBOX"]
     ).execute()
 
-    messages = results.get("messages", [])
+    messages = results.get(
+        "messages",
+        []
+    )
 
     filtered_emails = []
 
@@ -700,8 +777,15 @@ def get_filtered_emails():
             format="full"
         ).execute()
 
-        payload = data.get("payload", {})
-        headers = payload.get("headers", [])
+        payload = data.get(
+            "payload",
+            {}
+        )
+
+        headers = payload.get(
+            "headers",
+            []
+        )
 
         sender = ""
         subject = ""
@@ -717,63 +801,16 @@ def get_filtered_emails():
             elif name == "subject":
                 subject = value
 
-        snippet = data.get("snippet", "")
-
-        text = f"""
-        From: {sender}
-        Subject: {subject}
-        Email preview: {snippet}
-        """
-
-        completion = client.chat.completions.create(
-            model="openai/gpt-oss-20b",
-            messages=[
-                {
-                    "role": "system",
-                    "content": """
-                    Classify an email for an AI email assistant.
-
-                    Return ONLY one of these two words:
-
-                    PROCESS
-                    IGNORE
-
-                    PROCESS:
-                    - Genuine personal or professional messages
-                    - Questions about the creator's portfolio or projects
-                    - Messages that appear to require a personal response
-
-                    IGNORE:
-                    - Newsletters
-                    - Marketing emails
-                    - Promotional emails
-                    - Verification codes
-                    - Security alerts
-                    - Password reset emails
-                    - Automated notifications
-                    - Spam
-                    - Mass emails
-
-                    If uncertain, choose IGNORE.
-                    """
-                },
-                {
-                    "role": "user",
-                    "content": text
-                }
-            ],
-            temperature=0,
-            max_completion_tokens=10
+        snippet = data.get(
+            "snippet",
+            ""
         )
 
-        classification = (
-            completion.choices[0].message.content
-            .strip()
-            .upper()
+        classification = classify_email(
+            sender,
+            subject,
+            snippet
         )
-
-        if classification not in ["PROCESS", "IGNORE"]:
-            classification = "IGNORE"
 
         filtered_emails.append({
             "id": email_id,
@@ -787,4 +824,3 @@ def get_filtered_emails():
         "connected": True,
         "emails": filtered_emails
     }
-
