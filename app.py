@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from groq import Groq
 import os
 from google_auth_oauthlib.flow import Flow
+from googleapiclient.discovery import build
 
 app = FastAPI()
 
