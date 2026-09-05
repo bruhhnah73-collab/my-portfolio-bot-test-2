@@ -3,13 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from groq import Groq
 import os
-import json
-from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 
 app = FastAPI()
 
-# Allow your frontend to communicate with this backend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,7 +15,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Get Groq API key securely
+# =============================
+# API KEYS
+# =============================
+
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 client = Groq(api_key=GROQ_API_KEY)
@@ -35,13 +35,10 @@ GMAIL_SCOPES = [
 # AI AGENT SETTINGS
 # =============================
 
-# True = AI is active
-# False = AI is stopped
 agent_enabled = True
 
-# Stores OAuth state -> code verifier
+# Stores OAuth PKCE verifiers temporarily
 oauth_states = {}
-
 
 SYSTEM_INSTRUCTION = """
 You are an AI assistant representing the creator of this portfolio.
@@ -101,62 +98,16 @@ IMPORTANT:
   that are not explicitly mentioned.
 - If you don't have enough information to answer something accurately,
   say so naturally instead of guessing.
-- Do not make promises about the creator, such as promising to share code,
-  arrange meetings, provide services, or take actions, unless the creator
-  has explicitly instructed you to do so.
-- When discussing projects, stay faithful to the descriptions provided
-  above.
-- You may speak naturally using "I" when representing the creator, but
-  do not claim personal experiences or facts that are not provided.
-- Treat the project descriptions above as complete.
-- Do not infer additional features, purposes, technologies, or capabilities.
-- If a detail is not written in the project information above, do not
-  mention it as a fact.
-- It is better to give a shorter accurate answer than a longer answer
-  containing assumptions.
-- Natural wording is encouraged, but natural wording must not introduce
-  new factual claims.
-- Never invent the creator's availability, schedule, contact methods,
-  meeting preferences, or willingness to meet.
+- Do not make promises about the creator.
+- When discussing projects, stay faithful to the descriptions provided.
 - If someone asks about availability or scheduling and no specific
   information is provided, say that you don't have that information.
-- When describing a project, do not expand, interpret, or embellish the
-  project description.
-- Do not mention specific pages, features, design choices, technologies,
-  development methods, or purposes unless they are explicitly stated.
-- If someone asks for more detail than the provided project information
-  contains, clearly say that the available information is limited.
 
 PROJECT FACTUAL ACCURACY:
 - Project descriptions are CLOSED information.
-- You are NOT allowed to infer, assume, predict, or create any additional
-  details about a project.
-- If a detail is not explicitly written in the project description, you
-  MUST NOT mention it.
-- Do not use phrases such as "for example", "such as", "you'd expect",
-  or similar wording to introduce details that were not provided.
-- If asked for details that are not provided, say:
-  "I don't have that information in the project details I was given."
-
-STRICT PROJECT RULE:
-When answering about a project, copy only the facts explicitly stated in
-that project's description. Do not add, infer, explain, or elaborate on
-anything else.
-
-If the user asks for information that is not explicitly stated, respond:
-"I don't have that information in the project details I was given."
-
-Never turn a general statement into specific examples.
-Never describe how something works unless the description explicitly says
-how it works.
-Never claim a feature exists unless the description explicitly says it exists.
-
-ABSOLUTE PROJECT RULE:
-- Only use information explicitly written in the project description.
-- Do not add ANY details that are not explicitly written.
-- Do not infer features, pages, devices, design choices, functionality,
-  technologies, purposes, or development methods.
-- Do not use "for example" or "such as" to create additional project details.
+- Do not infer, assume, predict, or create additional project details.
+- If a detail is not explicitly written in the project description, do not
+  mention it.
 - If asked for information that is not provided, say:
   "I don't have that information in the project details I was given."
 
@@ -178,6 +129,9 @@ Avoid generic openings and repetitive phrases.
 The response should feel human, relevant, and natural.
 """
 
+# =============================
+# CHAT MODEL
+# =============================
 
 class ChatRequest(BaseModel):
     message: str
@@ -212,12 +166,11 @@ def gmail_auth():
         include_granted_scopes="true"
     )
 
-    # Save the PKCE code verifier so the callback can reuse it
+    # Save the PKCE verifier so the callback can use the same verifier
     oauth_states[state] = flow.code_verifier
 
     return {
-        "authorization_url": authorization_url,
-        "state": state
+        "authorization_url": authorization_url
     }
 
 
@@ -240,7 +193,7 @@ def gmail_callback(code: str, state: str):
         "https://my-portfolio-bot-test-2.onrender.com/gmail/callback"
     )
 
-    # Retrieve the code verifier created during /gmail/auth
+    # Retrieve and remove the original PKCE verifier
     code_verifier = oauth_states.pop(state, None)
 
     if not code_verifier:
@@ -248,17 +201,18 @@ def gmail_callback(code: str, state: str):
             "error": "OAuth session expired or invalid state"
         }
 
-    # Give the verifier back to the OAuth flow
+    # Give the callback the original verifier
     flow.code_verifier = code_verifier
 
+    # Exchange authorization code for credentials
     flow.fetch_token(code=code)
 
     credentials = flow.credentials
 
+    # IMPORTANT:
+    # Do NOT return access tokens or refresh tokens in the browser.
     return {
-        "message": "Gmail connected successfully!",
-        "token": credentials.token,
-        "refresh_token": credentials.refresh_token
+        "message": "Gmail connected successfully!"
     }
 
 
@@ -275,7 +229,7 @@ def home():
 
 
 # =============================
-# TURN AGENT ON
+# AGENT ON/OFF
 # =============================
 
 @app.post("/agent/on")
@@ -291,10 +245,6 @@ def turn_agent_on():
     }
 
 
-# =============================
-# TURN AGENT OFF
-# =============================
-
 @app.post("/agent/off")
 def turn_agent_off():
 
@@ -308,10 +258,6 @@ def turn_agent_off():
     }
 
 
-# =============================
-# CHECK AGENT STATUS
-# =============================
-
 @app.get("/agent/status")
 def agent_status():
 
@@ -321,21 +267,20 @@ def agent_status():
 
 
 # =============================
-# CHAT
+# AI CHAT
 # =============================
 
 @app.post("/chat")
 def chat(request: ChatRequest):
 
-    # Stop immediately if the agent is OFF
     if not agent_enabled:
+
         return {
             "response": None,
             "agent_enabled": False,
             "message": "AI agent is currently OFF"
         }
 
-    # Start with the AI's instructions
     messages = [
         {
             "role": "system",
@@ -343,16 +288,13 @@ def chat(request: ChatRequest):
         }
     ]
 
-    # Add previous conversation
     messages.extend(request.conversation)
 
-    # Add newest message
     messages.append({
         "role": "user",
         "content": request.message
     })
 
-    # Ask Groq
     completion = client.chat.completions.create(
         model="openai/gpt-oss-20b",
         messages=messages,
