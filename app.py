@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from groq import Groq
+from email.mime.text import MIMEText
 import os
 import base64
 
@@ -86,7 +87,9 @@ Respond naturally and conversationally.
 class ChatRequest(BaseModel):
     message: str
     conversation: list[dict] = []
-
+    
+class SendEmailRequest(BaseModel):
+    draft: str
 
 # =========================
 # GMAIL SERVICE
@@ -982,3 +985,84 @@ Email:
         "subject": subject,
         "draft": draft
     }
+
+@app.post("/gmail/send/{email_id}")
+def send_gmail_reply(email_id: str, request: SendEmailRequest):
+
+    draft = request.draft
+    if not gmail_credentials:
+        return {
+            "success": False,
+            "message": "Gmail is not connected."
+        }
+
+    try:
+        service = get_gmail_service()
+
+        original = service.users().messages().get(
+            userId="me",
+            id=email_id,
+            format="metadata",
+            metadataHeaders=["From", "Subject"]
+        ).execute()
+
+        headers = original.get("payload", {}).get("headers", [])
+
+        sender = ""
+        subject = ""
+
+        for header in headers:
+            if header["name"].lower() == "from":
+                sender = header["value"]
+
+            if header["name"].lower() == "subject":
+                subject = header["value"]
+
+        if not sender:
+            return {
+                "success": False,
+                "message": "Could not find the sender."
+            }
+
+        if not draft.strip():
+            return {
+                "success": False,
+                "message": "Draft cannot be empty."
+            }
+
+        if not subject.lower().startswith("re:"):
+            subject = f"Re: {subject}"
+
+        message = MIMEText(draft)
+        message["To"] = sender
+        message["Subject"] = subject
+
+        encoded_message = base64.urlsafe_b64encode(
+            message.as_bytes()
+        ).decode()
+
+        send_message = {
+            "raw": encoded_message,
+            "threadId": original.get("threadId")
+        }
+
+        sent = service.users().messages().send(
+            userId="me",
+            body=send_message
+        ).execute()
+
+        return {
+            "success": True,
+            "message": "Reply sent successfully.",
+            "email_id": email_id,
+            "sent_message_id": sent.get("id")
+        }
+
+    except Exception as e:
+        print("Gmail send error:", e)
+
+        return {
+            "success": False,
+            "message": "Failed to send the email."
+        }
+     
