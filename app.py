@@ -5,6 +5,7 @@ from groq import Groq
 import os
 import json
 from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import Flow
 
 app = FastAPI()
 
@@ -23,6 +24,10 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET")
+GMAIL_SCOPES = [
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.compose"
+]
 
 # =============================
 # AI AGENT SETTINGS
@@ -172,8 +177,61 @@ The response should feel human, relevant, and natural.
 class ChatRequest(BaseModel):
     message: str
     conversation: list[dict] = []
+# =============================
+# GMAIL OAUTH
+# =============================
 
+@app.get("/gmail/auth")
+def gmail_auth():
+    flow = Flow.from_client_config(
+        {
+            "web": {
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+            }
+        },
+        scopes=GMAIL_SCOPES
+    )
 
+    flow.redirect_uri = "https://my-portfolio-bot-test-2.onrender.com/gmail/callback"
+
+    authorization_url, state = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="true",
+        prompt="consent"
+    )
+
+    return {
+        "authorization_url": authorization_url,
+        "state": state
+    }
+@app.get("/gmail/callback")
+def gmail_callback(code: str):
+    flow = Flow.from_client_config(
+        {
+            "web": {
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+            }
+        },
+        scopes=GMAIL_SCOPES
+    )
+
+    flow.redirect_uri = "https://my-portfolio-bot-test-2.onrender.com/gmail/callback"
+
+    flow.fetch_token(code=code)
+
+    credentials = flow.credentials
+
+    return {
+        "message": "Gmail connected successfully!",
+        "token": credentials.token,
+        "refresh_token": credentials.refresh_token
+    }
 # =============================
 # HOME
 # =============================
