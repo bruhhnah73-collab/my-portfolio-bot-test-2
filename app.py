@@ -101,6 +101,8 @@ IMPORTANT:
   mention it as a fact.
 - It is better to give a shorter accurate answer than a longer answer
   containing assumptions.
+  - Natural wording is encouraged, but natural wording must not introduce
+  new factual claims.
   
 EMAIL CONVERSATIONS:
 
