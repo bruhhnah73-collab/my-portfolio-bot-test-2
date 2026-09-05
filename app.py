@@ -201,6 +201,7 @@ def gmail_auth():
         access_type="offline",
         include_granted_scopes="true"
     )
+    oauth_states[state] = flow.code_verifier
 
     return {
         "authorization_url": authorization_url,
