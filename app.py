@@ -12,6 +12,11 @@ from googleapiclient.discovery import build
 
 app = FastAPI()
 
+
+# =========================
+# CORS
+# =========================
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -33,7 +38,7 @@ client = Groq(api_key=GROQ_API_KEY)
 
 
 # =========================
-# GMAIL
+# GMAIL SETTINGS
 # =========================
 
 GMAIL_SCOPES = [
@@ -46,7 +51,7 @@ agent_enabled = True
 
 
 # =========================
-# CHAT
+# AI CHAT INSTRUCTIONS
 # =========================
 
 SYSTEM_INSTRUCTION = """
@@ -167,10 +172,14 @@ def gmail_callback(
     code_verifier = request.cookies.get("oauth_verifier")
 
     if not saved_state or saved_state != state:
-        return {"error": "Invalid OAuth state"}
+        return {
+            "error": "Invalid OAuth state"
+        }
 
     if not code_verifier:
-        return {"error": "Missing OAuth code verifier"}
+        return {
+            "error": "Missing OAuth code verifier"
+        }
 
     flow = Flow.from_client_config(
         {
@@ -217,7 +226,7 @@ def gmail_status():
 
 
 # =========================
-# GET INBOX
+# GET INBOX EMAILS
 # =========================
 
 @app.get("/gmail/emails")
@@ -237,7 +246,10 @@ def get_emails():
         labelIds=["INBOX"]
     ).execute()
 
-    messages = results.get("messages", [])
+    messages = results.get(
+        "messages",
+        []
+    )
 
     emails = []
 
@@ -255,7 +267,13 @@ def get_emails():
             ]
         ).execute()
 
-        headers = data.get("payload", {}).get("headers", [])
+        headers = data.get(
+            "payload",
+            {}
+        ).get(
+            "headers",
+            []
+        )
 
         sender = ""
         recipient = ""
@@ -284,7 +302,10 @@ def get_emails():
             "to": recipient,
             "subject": subject,
             "date": date,
-            "snippet": data.get("snippet", "")
+            "snippet": data.get(
+                "snippet",
+                ""
+            )
         })
 
     return {
@@ -313,8 +334,15 @@ def get_email(email_id: str):
         format="full"
     ).execute()
 
-    payload = data.get("payload", {})
-    headers = payload.get("headers", [])
+    payload = data.get(
+        "payload",
+        {}
+    )
+
+    headers = payload.get(
+        "headers",
+        []
+    )
 
     sender = ""
     recipient = ""
@@ -345,9 +373,13 @@ def get_email(email_id: str):
 
             if part.get("mimeType") == "text/plain":
 
-                body_data = part.get("body", {}).get("data")
+                body_data = part.get(
+                    "body",
+                    {}
+                ).get("data")
 
                 if body_data:
+
                     body = base64.urlsafe_b64decode(
                         body_data
                     ).decode(
@@ -359,7 +391,10 @@ def get_email(email_id: str):
 
     else:
 
-        body_data = payload.get("body", {}).get("data")
+        body_data = payload.get(
+            "body",
+            {}
+        ).get("data")
 
         if body_data:
 
@@ -441,7 +476,7 @@ def agent_status():
 
 
 # =========================
-# CHAT
+# AI CHAT
 # =========================
 
 @app.post("/chat")
@@ -494,7 +529,7 @@ def classify_email(sender, subject, snippet):
     text = f"{sender} {subject} {snippet}"
 
 
-    # DEFINITELY IGNORE AUTOMATED EMAILS
+    # AUTOMATED EMAILS
 
     ignore_words = [
         "verification code",
@@ -526,7 +561,7 @@ def classify_email(sender, subject, snippet):
             return "IGNORE"
 
 
-    # DEFINITELY PROCESS PORTFOLIO QUESTIONS
+    # PORTFOLIO QUESTIONS
 
     portfolio_words = [
         "portfolio",
@@ -564,7 +599,7 @@ def classify_email(sender, subject, snippet):
         return "PROCESS"
 
 
-    # AI CLASSIFICATION
+    # AI CLASSIFIER
 
     completion = client.chat.completions.create(
         model="openai/gpt-oss-20b",
@@ -782,4 +817,168 @@ def filtered_emails():
     return {
         "connected": True,
         "emails": emails
+    }
+
+
+# =========================
+# GENERATE EMAIL DRAFT
+# =========================
+
+@app.post("/gmail/draft/{email_id}")
+def generate_email_draft(email_id: str):
+
+    service = get_gmail_service()
+
+    if service is None:
+        return {
+            "connected": False,
+            "error": "Gmail is not connected"
+        }
+
+    data = service.users().messages().get(
+        userId="me",
+        id=email_id,
+        format="full"
+    ).execute()
+
+    payload = data.get(
+        "payload",
+        {}
+    )
+
+    headers = payload.get(
+        "headers",
+        []
+    )
+
+    sender = ""
+    subject = ""
+
+    for header in headers:
+
+        name = header["name"].lower()
+
+        if name == "from":
+            sender = header["value"]
+
+        elif name == "subject":
+            subject = header["value"]
+
+
+    # GET EMAIL BODY
+
+    body = ""
+
+    if "parts" in payload:
+
+        for part in payload["parts"]:
+
+            if part.get("mimeType") == "text/plain":
+
+                body_data = part.get(
+                    "body",
+                    {}
+                ).get("data")
+
+                if body_data:
+
+                    body = base64.urlsafe_b64decode(
+                        body_data
+                    ).decode(
+                        "utf-8",
+                        errors="ignore"
+                    )
+
+                break
+
+    else:
+
+        body_data = payload.get(
+            "body",
+            {}
+        ).get("data")
+
+        if body_data:
+
+            body = base64.urlsafe_b64decode(
+                body_data
+            ).decode(
+                "utf-8",
+                errors="ignore"
+            )
+
+
+    # GENERATE AI REPLY
+
+    completion = client.chat.completions.create(
+        model="openai/gpt-oss-20b",
+        messages=[
+            {
+                "role": "system",
+                "content": """
+You write email replies for the creator of a portfolio.
+
+Write a natural and helpful reply to the incoming email.
+
+Portfolio information:
+
+- School Admin Dashboard
+  Built using Replit.
+  A functional administrative login portal and dashboard data interface.
+
+- School Landing Page
+  Built using Visual Studio Code.
+  A clean, fully responsive multi-page website built for a real school.
+
+- My First AI Chatbox
+  Built using Ziper AI.
+  An AI chatbox providing information about the portfolio and projects.
+
+- Custom Python AI Chatbot
+  Built using Python, Streamlit, and Visual Studio Code.
+  A custom portfolio assistant featuring real-time response streaming.
+
+Rules:
+- Answer the actual question.
+- Sound like a real person.
+- Be friendly.
+- Be professional when appropriate.
+- Keep the reply reasonably short.
+- Do not invent information.
+- Do not claim the creator has skills or experience that aren't listed.
+- Do not mention that you are an AI.
+- Do not include a subject line.
+- Return ONLY the email reply.
+"""
+            },
+            {
+                "role": "user",
+                "content": f"""
+From:
+{sender}
+
+Subject:
+{subject}
+
+Email:
+{body}
+"""
+            }
+        ],
+        temperature=0.6,
+        max_completion_tokens=500
+    )
+
+    draft = (
+        completion.choices[0]
+        .message
+        .content
+        .strip()
+    )
+
+    return {
+        "email_id": email_id,
+        "from": sender,
+        "subject": subject,
+        "draft": draft
     }
