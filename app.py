@@ -1,4 +1,3 @@
-```python
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -21,7 +20,15 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 client = Groq(api_key=GROQ_API_KEY)
 
-# AI instructions
+# =============================
+# AI AGENT SETTINGS
+# =============================
+
+# True = AI is active
+# False = AI is stopped
+agent_enabled = True
+
+
 SYSTEM_INSTRUCTION = """
 You are an AI assistant that responds naturally and appropriately
 to messages in an ongoing conversation.
@@ -41,15 +48,75 @@ class ChatRequest(BaseModel):
     conversation: list[dict] = []
 
 
+# =============================
+# HOME
+# =============================
+
 @app.get("/")
 def home():
     return {
-        "status": "AI agent backend is running!"
+        "status": "AI agent backend is running!",
+        "agent_enabled": agent_enabled
     }
 
 
+# =============================
+# TURN AGENT ON
+# =============================
+
+@app.post("/agent/on")
+def turn_agent_on():
+    global agent_enabled
+
+    agent_enabled = True
+
+    return {
+        "agent_enabled": True,
+        "message": "AI agent is ON"
+    }
+
+
+# =============================
+# TURN AGENT OFF
+# =============================
+
+@app.post("/agent/off")
+def turn_agent_off():
+    global agent_enabled
+
+    agent_enabled = False
+
+    return {
+        "agent_enabled": False,
+        "message": "AI agent is OFF"
+    }
+
+
+# =============================
+# CHECK AGENT STATUS
+# =============================
+
+@app.get("/agent/status")
+def agent_status():
+    return {
+        "agent_enabled": agent_enabled
+    }
+
+
+# =============================
+# CHAT
+# =============================
+
 @app.post("/chat")
 def chat(request: ChatRequest):
+
+    # Stop immediately if the agent is OFF
+    if not agent_enabled:
+        return {
+            "response": None,
+            "agent_enabled": False,
+            "message": "AI agent is currently OFF"
+        }
 
     # Start with the AI's instructions
     messages = [
@@ -62,13 +129,13 @@ def chat(request: ChatRequest):
     # Add previous conversation
     messages.extend(request.conversation)
 
-    # Add the newest message
+    # Add newest message
     messages.append({
         "role": "user",
         "content": request.message
     })
 
-    # Ask the AI for a response
+    # Ask Groq
     completion = client.chat.completions.create(
         model="openai/gpt-oss-20b",
         messages=messages,
@@ -79,6 +146,7 @@ def chat(request: ChatRequest):
     response = completion.choices[0].message.content
 
     return {
-        "response": response
+        "response": response,
+        "agent_enabled": True
     }
 ```
