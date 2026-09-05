@@ -4,6 +4,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from groq import Groq
 import os
+import base64
 
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
@@ -48,7 +49,6 @@ GMAIL_SCOPES = [
 # =============================
 
 agent_enabled = True
-
 
 # Stores Gmail credentials while the server is running
 gmail_credentials = None
@@ -186,8 +186,6 @@ def gmail_auth(response: Response):
         include_granted_scopes="true"
     )
 
-    # Store OAuth state and PKCE verifier in a secure browser cookie.
-    # This survives Render restarts because the data is stored in the browser.
     response.set_cookie(
         key="oauth_state",
         value=state,
@@ -225,11 +223,9 @@ def gmail_callback(
 
     global gmail_credentials
 
-    # Get the saved OAuth information from the browser cookies.
     saved_state = request.cookies.get("oauth_state")
     code_verifier = request.cookies.get("oauth_verifier")
 
-    # Check that the returned state matches the state we created.
     if not saved_state or saved_state != state:
         return {
             "error": "OAuth session expired or invalid state"
@@ -256,15 +252,12 @@ def gmail_callback(
         "https://my-portfolio-bot-test-2.onrender.com/gmail/callback"
     )
 
-    # Restore the PKCE verifier.
     flow.code_verifier = code_verifier
 
-    # Exchange Google's authorization code for Gmail credentials.
     flow.fetch_token(code=code)
 
     gmail_credentials = flow.credentials
 
-    # Delete the temporary OAuth cookies.
     redirect = RedirectResponse(
         url="https://email-agent-panel.onrender.com/"
     )
@@ -381,6 +374,7 @@ def get_emails():
         "emails": emails
     }
 
+
 # =============================
 # READ FULL GMAIL EMAIL
 # =============================
@@ -403,7 +397,6 @@ def get_email(email_id: str):
     ).execute()
 
     payload = data.get("payload", {})
-
     headers = payload.get("headers", [])
 
     sender = ""
@@ -439,7 +432,6 @@ def get_email(email_id: str):
                 body_data = part.get("body", {}).get("data")
 
                 if body_data:
-                    import base64
 
                     body = base64.urlsafe_b64decode(
                         body_data
@@ -455,8 +447,6 @@ def get_email(email_id: str):
         body_data = payload.get("body", {}).get("data")
 
         if body_data:
-
-            import base64
 
             body = base64.urlsafe_b64decode(
                 body_data
@@ -476,6 +466,8 @@ def get_email(email_id: str):
             "body": body
         }
     }
+
+
 # =============================
 # HOME
 # =============================
@@ -569,6 +561,8 @@ def chat(request: ChatRequest):
         "response": response_text,
         "agent_enabled": True
     }
+
+
 # =============================
 # EMAIL FILTER
 # =============================
@@ -656,11 +650,22 @@ def filter_email(email_id: str):
         max_completion_tokens=10
     )
 
-    classification = completion.choices[0].message.content.strip().upper()
+    classification = (
+        completion.choices[0].message.content
+        .strip()
+        .upper()
+    )
 
     if classification not in ["PROCESS", "IGNORE"]:
         classification = "IGNORE"
-        # =============================
+
+    return {
+        "email_id": email_id,
+        "classification": classification
+    }
+
+
+# =============================
 # FILTER ALL INBOX EMAILS
 # =============================
 
@@ -783,7 +788,3 @@ def get_filtered_emails():
         "emails": filtered_emails
     }
 
-    return {
-        "email_id": email_id,
-        "classification": classification
-    }
