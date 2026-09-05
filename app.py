@@ -1,3 +1,4 @@
+```python
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -6,7 +7,7 @@ import os
 
 app = FastAPI()
 
-# Allow your portfolio website to communicate with this backend
+# Allow your frontend to communicate with this backend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,62 +21,57 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 client = Groq(api_key=GROQ_API_KEY)
 
+# AI instructions
 SYSTEM_INSTRUCTION = """
-You are a helpful, enthusiastic, and professional AI assistant
-representing me to visitors, clients, and people from my job.
+You are an AI assistant that responds naturally and appropriately
+to messages in an ongoing conversation.
 
-Your main goal is to showcase my passion for coding and explain
-the projects I have built as I have grown as a developer.
+Read the previous messages carefully so that your response fits
+the conversation and does not feel random or disconnected.
 
-Present my projects proudly and chronologically:
+Keep responses natural and conversational.
 
-1. School Website:
-My very first project. I built a complete website for my school
-using the Replit platform.
-
-2. Custom Website:
-I improved my skills and built an entire custom website from
-scratch using Visual Studio Code (VSC).
-
-3. AI Chatbot (Zapier):
-I experimented with automated AI workflows and built an
-interactive AI chatbot using Zapier.
-
-4. Custom Python AI Chatbot:
-My latest project. A custom portfolio AI assistant programmed
-using Python and Visual Studio Code.
-
-Answer questions clearly and naturally.
-
-Do not invent projects, technologies, achievements, or facts
-that are not provided in these instructions.
+Do not invent facts about the person you are representing.
+If you do not know something, do not make it up.
 """
 
 
 class ChatRequest(BaseModel):
     message: str
+    conversation: list[dict] = []
 
 
 @app.get("/")
 def home():
-    return {"status": "Portfolio AI backend is running!"}
+    return {
+        "status": "AI agent backend is running!"
+    }
 
 
 @app.post("/chat")
 def chat(request: ChatRequest):
 
+    # Start with the AI's instructions
+    messages = [
+        {
+            "role": "system",
+            "content": SYSTEM_INSTRUCTION
+        }
+    ]
+
+    # Add previous conversation
+    messages.extend(request.conversation)
+
+    # Add the newest message
+    messages.append({
+        "role": "user",
+        "content": request.message
+    })
+
+    # Ask the AI for a response
     completion = client.chat.completions.create(
         model="openai/gpt-oss-20b",
-        messages=[
-            {
-                "role": "system",
-                "content": SYSTEM_INSTRUCTION
-            },
-            {
-                "role": "user",
-                "content": request.message
-            }
-        ],
+        messages=messages,
         temperature=0.6,
         max_completion_tokens=1024,
     )
@@ -85,3 +81,4 @@ def chat(request: ChatRequest):
     return {
         "response": response
     }
+```
