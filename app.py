@@ -602,6 +602,32 @@ def classify_email(sender, subject, snippet):
     if has_portfolio_topic and has_question:
         return "PROCESS"
 
+    # COLLABORATION / OPPORTUNITY EMAILS
+
+    collaboration_words = [
+        "work with you",
+        "work together",
+        "collaborate",
+        "collaboration",
+        "interested in working",
+        "would like to work",
+        "want to work",
+        "project opportunity",
+        "business opportunity",
+        "partnership",
+        "partner with you",
+        "join our team",
+        "work on a project",
+        "hire you",
+        "hiring"
+    ]
+
+    if any(
+        word in text
+        for word in collaboration_words
+    ):
+        return "PROCESS"
+
     # AI CLASSIFIER
 
     completion = client.chat.completions.create(
@@ -627,6 +653,9 @@ PROCESS:
 - Collaboration inquiry
 - Portfolio question
 - Someone expecting a personal response
+- Someone interested in working with the creator
+- Job or project opportunity
+- Partnership or business opportunity
 
 IGNORE:
 - Automated emails
@@ -679,8 +708,6 @@ Email:
         return "PROCESS"
 
     return "IGNORE"
-
-
 # =========================
 # FILTER ONE EMAIL
 # =========================
