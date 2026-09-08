@@ -7,7 +7,7 @@ from email.mime.text import MIMEText
 import os
 import base64
 import re
-import json
+import psycopg2
 
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
@@ -39,6 +39,8 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
 
+SUPABASE_DB_URL = os.environ.get("SUPABASE_DB_URL", "").strip()
+
 client = Groq(api_key=GROQ_API_KEY)
 
 
@@ -51,131 +53,242 @@ GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.compose"
 ]
 
-# Persistent location on Render.
-# Mount a Render persistent disk at /var/data.
-GMAIL_TOKEN_FILE = os.environ.get(
-    "GMAIL_TOKEN_FILE",
-    "/var/data/gmail_token.json"
-)
-
 gmail_credentials = None
 agent_enabled = True
 
 
 # =========================
-# LOAD SAVED GMAIL CREDENTIALS
+# DATABASE
 # =========================
 
-def load_gmail_credentials():
+def get_db_connection():
 
-    global gmail_credentials
+    if not SUPABASE_DB_URL:
+        print("SUPABASE_DB_URL is not configured.")
+        return None
 
     try:
-
-        if not os.path.exists(GMAIL_TOKEN_FILE):
-            print("No saved Gmail credentials found.")
-            gmail_credentials = None
-            return
-
-        with open(
-            GMAIL_TOKEN_FILE,
-            "r",
-            encoding="utf-8"
-        ) as token_file:
-
-            token_data = json.load(token_file)
-
-        gmail_credentials = Credentials.from_authorized_user_info(
-            token_data,
-            GMAIL_SCOPES
+        return psycopg2.connect(
+            SUPABASE_DB_URL,
+            sslmode="require"
         )
-
-        # Automatically refresh expired access token
-        if gmail_credentials.expired:
-
-            if gmail_credentials.refresh_token:
-
-                gmail_credentials.refresh(
-                    GoogleRequest()
-                )
-
-                save_gmail_credentials()
-
-                print(
-                    "Gmail access token refreshed successfully."
-                )
-
-            else:
-
-                print(
-                    "Saved Gmail credentials have no refresh token."
-                )
-
-                gmail_credentials = None
-
-        else:
-
-            print(
-                "Saved Gmail connection loaded successfully."
-            )
 
     except Exception as e:
-
-        print(
-            "Failed to load Gmail credentials:",
-            e
-        )
-
-        gmail_credentials = None
+        print("Database connection error:", e)
+        return None
 
 
-# =========================
-# SAVE GMAIL CREDENTIALS
-# =========================
+def setup_database():
 
-def save_gmail_credentials():
+    connection = get_db_connection()
 
-    global gmail_credentials
-
-    if gmail_credentials is None:
+    if connection is None:
         return
 
     try:
 
-        directory = os.path.dirname(
-            GMAIL_TOKEN_FILE
-        )
+        cursor = connection.cursor()
 
-        if directory:
-            os.makedirs(
-                directory,
-                exist_ok=True
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS gmail_credentials (
+                id INTEGER PRIMARY KEY,
+                token TEXT NOT NULL,
+                refresh_token TEXT,
+                token_uri TEXT NOT NULL,
+                client_id TEXT NOT NULL,
+                client_secret TEXT NOT NULL,
+                scopes TEXT NOT NULL
             )
+        """)
 
-        with open(
-            GMAIL_TOKEN_FILE,
-            "w",
-            encoding="utf-8"
-        ) as token_file:
+        connection.commit()
+        cursor.close()
+        connection.close()
 
-            token_file.write(
-                gmail_credentials.to_json()
-            )
-
-        print(
-            "Gmail credentials saved successfully."
-        )
+        print("Database ready.")
 
     except Exception as e:
 
-        print(
-            "Failed to save Gmail credentials:",
-            e
+        print("Database setup error:", e)
+
+        try:
+            connection.close()
+        except:
+            pass
+
+
+def save_gmail_credentials(credentials):
+
+    connection = get_db_connection()
+
+    if connection is None:
+        print("Could not save Gmail credentials.")
+        return False
+
+    try:
+
+        cursor = connection.cursor()
+
+        cursor.execute("""
+            INSERT INTO gmail_credentials (
+                id,
+                token,
+                refresh_token,
+                token_uri,
+                client_id,
+                client_secret,
+                scopes
+            )
+            VALUES (1, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (id)
+            DO UPDATE SET
+                token = EXCLUDED.token,
+                refresh_token = EXCLUDED.refresh_token,
+                token_uri = EXCLUDED.token_uri,
+                client_id = EXCLUDED.client_id,
+                client_secret = EXCLUDED.client_secret,
+                scopes = EXCLUDED.scopes
+        """, (
+            credentials.token,
+            credentials.refresh_token,
+            credentials.token_uri,
+            credentials.client_id,
+            credentials.client_secret,
+            " ".join(credentials.scopes or GMAIL_SCOPES)
+        ))
+
+        connection.commit()
+
+        cursor.close()
+        connection.close()
+
+        return True
+
+    except Exception as e:
+
+        print("Could not save Gmail credentials:", e)
+
+        try:
+            connection.close()
+        except:
+            pass
+
+        return False
+
+
+def load_gmail_credentials():
+
+    connection = get_db_connection()
+
+    if connection is None:
+        return None
+
+    try:
+
+        cursor = connection.cursor()
+
+        cursor.execute("""
+            SELECT
+                token,
+                refresh_token,
+                token_uri,
+                client_id,
+                client_secret,
+                scopes
+            FROM gmail_credentials
+            WHERE id = 1
+        """)
+
+        row = cursor.fetchone()
+
+        cursor.close()
+        connection.close()
+
+        if not row:
+            return None
+
+        token = row[0]
+        refresh_token = row[1]
+        token_uri = row[2]
+        client_id = row[3]
+        client_secret = row[4]
+        scopes = row[5].split()
+
+        credentials = Credentials(
+            token=token,
+            refresh_token=refresh_token,
+            token_uri=token_uri,
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=scopes
         )
 
+        if credentials.expired and credentials.refresh_token:
 
-# Load Gmail connection when application starts
-load_gmail_credentials()
+            credentials.refresh(
+                GoogleRequest()
+            )
+
+            save_gmail_credentials(
+                credentials
+            )
+
+        return credentials
+
+    except Exception as e:
+
+        print("Could not load Gmail credentials:", e)
+
+        try:
+            connection.close()
+        except:
+            pass
+
+        return None
+
+
+def delete_gmail_credentials():
+
+    connection = get_db_connection()
+
+    if connection is None:
+        return False
+
+    try:
+
+        cursor = connection.cursor()
+
+        cursor.execute("""
+            DELETE FROM gmail_credentials
+            WHERE id = 1
+        """)
+
+        connection.commit()
+
+        cursor.close()
+        connection.close()
+
+        return True
+
+    except Exception as e:
+
+        print("Could not delete Gmail credentials:", e)
+
+        try:
+            connection.close()
+        except:
+            pass
+
+        return False
+
+
+# =========================
+# LOAD GMAIL CONNECTION
+# =========================
+
+setup_database()
+
+gmail_credentials = load_gmail_credentials()
 
 
 # =========================
@@ -280,20 +393,18 @@ def get_gmail_service():
 
     try:
 
-        # Automatically refresh expired access token
         if gmail_credentials.expired:
 
             if not gmail_credentials.refresh_token:
-
-                gmail_credentials = None
-
                 return None
 
             gmail_credentials.refresh(
                 GoogleRequest()
             )
 
-            save_gmail_credentials()
+            save_gmail_credentials(
+                gmail_credentials
+            )
 
         return build(
             "gmail",
@@ -303,12 +414,7 @@ def get_gmail_service():
 
     except Exception as e:
 
-        print(
-            "Gmail authentication error:",
-            e
-        )
-
-        gmail_credentials = None
+        print("Gmail service error:", e)
 
         return None
 
@@ -413,9 +519,10 @@ def gmail_callback(
 
     gmail_credentials = flow.credentials
 
-    # IMPORTANT:
-    # Save the refresh token and access token persistently.
-    save_gmail_credentials()
+    # SAVE THE GMAIL CONNECTION
+    save_gmail_credentials(
+        gmail_credentials
+    )
 
     redirect = RedirectResponse(
         url="https://email-agent-panel.onrender.com/"
@@ -436,11 +543,11 @@ def gmail_status():
 
     global gmail_credentials
 
-    # Try refreshing/loading credentials if needed
-    service = get_gmail_service()
+    if gmail_credentials is None:
+        gmail_credentials = load_gmail_credentials()
 
     return {
-        "connected": service is not None
+        "connected": gmail_credentials is not None
     }
 
 
@@ -455,24 +562,11 @@ def gmail_disconnect():
 
     gmail_credentials = None
 
-    try:
-
-        if os.path.exists(GMAIL_TOKEN_FILE):
-
-            os.remove(
-                GMAIL_TOKEN_FILE
-            )
-
-    except Exception as e:
-
-        print(
-            "Failed to remove Gmail credentials:",
-            e
-        )
+    success = delete_gmail_credentials()
 
     return {
-        "connected": False,
-        "message": "Gmail disconnected successfully."
+        "success": success,
+        "connected": False
     }
 
 
@@ -1303,12 +1397,6 @@ def send_gmail_reply(
     try:
 
         service = get_gmail_service()
-
-        if service is None:
-            return {
-                "success": False,
-                "message": "Gmail is not connected."
-            }
 
         original = service.users().messages().get(
             userId="me",
