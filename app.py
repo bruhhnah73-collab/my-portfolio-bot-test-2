@@ -7,9 +7,12 @@ from email.mime.text import MIMEText
 import os
 import base64
 import re
+import json
 
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request as GoogleRequest
 
 
 app = FastAPI()
@@ -48,8 +51,131 @@ GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.compose"
 ]
 
+# Persistent location on Render.
+# Mount a Render persistent disk at /var/data.
+GMAIL_TOKEN_FILE = os.environ.get(
+    "GMAIL_TOKEN_FILE",
+    "/var/data/gmail_token.json"
+)
+
 gmail_credentials = None
 agent_enabled = True
+
+
+# =========================
+# LOAD SAVED GMAIL CREDENTIALS
+# =========================
+
+def load_gmail_credentials():
+
+    global gmail_credentials
+
+    try:
+
+        if not os.path.exists(GMAIL_TOKEN_FILE):
+            print("No saved Gmail credentials found.")
+            gmail_credentials = None
+            return
+
+        with open(
+            GMAIL_TOKEN_FILE,
+            "r",
+            encoding="utf-8"
+        ) as token_file:
+
+            token_data = json.load(token_file)
+
+        gmail_credentials = Credentials.from_authorized_user_info(
+            token_data,
+            GMAIL_SCOPES
+        )
+
+        # Automatically refresh expired access token
+        if gmail_credentials.expired:
+
+            if gmail_credentials.refresh_token:
+
+                gmail_credentials.refresh(
+                    GoogleRequest()
+                )
+
+                save_gmail_credentials()
+
+                print(
+                    "Gmail access token refreshed successfully."
+                )
+
+            else:
+
+                print(
+                    "Saved Gmail credentials have no refresh token."
+                )
+
+                gmail_credentials = None
+
+        else:
+
+            print(
+                "Saved Gmail connection loaded successfully."
+            )
+
+    except Exception as e:
+
+        print(
+            "Failed to load Gmail credentials:",
+            e
+        )
+
+        gmail_credentials = None
+
+
+# =========================
+# SAVE GMAIL CREDENTIALS
+# =========================
+
+def save_gmail_credentials():
+
+    global gmail_credentials
+
+    if gmail_credentials is None:
+        return
+
+    try:
+
+        directory = os.path.dirname(
+            GMAIL_TOKEN_FILE
+        )
+
+        if directory:
+            os.makedirs(
+                directory,
+                exist_ok=True
+            )
+
+        with open(
+            GMAIL_TOKEN_FILE,
+            "w",
+            encoding="utf-8"
+        ) as token_file:
+
+            token_file.write(
+                gmail_credentials.to_json()
+            )
+
+        print(
+            "Gmail credentials saved successfully."
+        )
+
+    except Exception as e:
+
+        print(
+            "Failed to save Gmail credentials:",
+            e
+        )
+
+
+# Load Gmail connection when application starts
+load_gmail_credentials()
 
 
 # =========================
@@ -147,14 +273,44 @@ class SendEmailRequest(BaseModel):
 
 def get_gmail_service():
 
+    global gmail_credentials
+
     if gmail_credentials is None:
         return None
 
-    return build(
-        "gmail",
-        "v1",
-        credentials=gmail_credentials
-    )
+    try:
+
+        # Automatically refresh expired access token
+        if gmail_credentials.expired:
+
+            if not gmail_credentials.refresh_token:
+
+                gmail_credentials = None
+
+                return None
+
+            gmail_credentials.refresh(
+                GoogleRequest()
+            )
+
+            save_gmail_credentials()
+
+        return build(
+            "gmail",
+            "v1",
+            credentials=gmail_credentials
+        )
+
+    except Exception as e:
+
+        print(
+            "Gmail authentication error:",
+            e
+        )
+
+        gmail_credentials = None
+
+        return None
 
 
 # =========================
@@ -182,7 +338,8 @@ def gmail_auth(response: Response):
 
     authorization_url, state = flow.authorization_url(
         access_type="offline",
-        include_granted_scopes="true"
+        include_granted_scopes="true",
+        prompt="consent"
     )
 
     response.set_cookie(
@@ -256,6 +413,10 @@ def gmail_callback(
 
     gmail_credentials = flow.credentials
 
+    # IMPORTANT:
+    # Save the refresh token and access token persistently.
+    save_gmail_credentials()
+
     redirect = RedirectResponse(
         url="https://email-agent-panel.onrender.com/"
     )
@@ -273,8 +434,45 @@ def gmail_callback(
 @app.get("/gmail/status")
 def gmail_status():
 
+    global gmail_credentials
+
+    # Try refreshing/loading credentials if needed
+    service = get_gmail_service()
+
     return {
-        "connected": gmail_credentials is not None
+        "connected": service is not None
+    }
+
+
+# =========================
+# GMAIL DISCONNECT
+# =========================
+
+@app.post("/gmail/disconnect")
+def gmail_disconnect():
+
+    global gmail_credentials
+
+    gmail_credentials = None
+
+    try:
+
+        if os.path.exists(GMAIL_TOKEN_FILE):
+
+            os.remove(
+                GMAIL_TOKEN_FILE
+            )
+
+    except Exception as e:
+
+        print(
+            "Failed to remove Gmail credentials:",
+            e
+        )
+
+    return {
+        "connected": False,
+        "message": "Gmail disconnected successfully."
     }
 
 
@@ -1105,6 +1303,12 @@ def send_gmail_reply(
     try:
 
         service = get_gmail_service()
+
+        if service is None:
+            return {
+                "success": False,
+                "message": "Gmail is not connected."
+            }
 
         original = service.users().messages().get(
             userId="me",
