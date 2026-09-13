@@ -355,6 +355,14 @@ Output:
 A dedicated showcase website featuring the creator's projects and
 development work.
 
+8. 🌦️ Weather Forecast
+A weather forecast website that provides weather information and forecasts.
+
+9. ⚡ Electronic Lab
+A Tinkercad-style electronics laboratory where users can build and simulate
+electronic circuits using components such as Arduino, LEDs, resistors,
+pushbuttons, buzzers, and sensors.
+
 When answering questions about the creator:
 
 - Use the project information provided above.
