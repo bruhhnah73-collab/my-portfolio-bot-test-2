@@ -69,6 +69,14 @@ DATABASE_URL = os.getenv(
     "DATABASE_URL"
 )
 
+GOOGLE_CLIENT_ID = os.getenv(
+    "GOOGLE_CLIENT_ID"
+)
+
+GOOGLE_CLIENT_SECRET = os.getenv(
+    "GOOGLE_CLIENT_SECRET"
+)
+
 
 # =========================================================
 # DATABASE DEBUG
@@ -105,15 +113,6 @@ else:
     print(
         "DB DEBUG: DATABASE_URL IS MISSING"
     )
-
-
-GOOGLE_CLIENT_ID = os.getenv(
-    "GOOGLE_CLIENT_ID"
-)
-
-GOOGLE_CLIENT_SECRET = os.getenv(
-    "GOOGLE_CLIENT_SECRET"
-)
 
 
 # =========================================================
@@ -912,7 +911,7 @@ def gmail_callback(
     ):
 
         print(
-            "OAUTH STATE ERROR:",
+            "OAUTH STATE ERROR: "
             "saved_state exists =",
             bool(saved_state),
             "returned_state exists =",
@@ -1551,21 +1550,153 @@ def classify_email(
 ):
 
     if not groq_client:
-
         return "Other"
 
     prompt = f"""
-Classify this email into exactly ONE category.
+You are an expert email classification system.
 
-Categories:
+Classify the email into EXACTLY ONE of these categories:
 
-- Important
-- Reply Needed
-- Newsletter
-- Promotion
-- Notification
-- Spam
-- Other
+Reply Needed
+Important
+Newsletter
+Promotion
+Notification
+Spam
+Other
+
+=========================================================
+CLASSIFICATION RULES
+=========================================================
+
+REPLY NEEDED
+
+Choose "Reply Needed" when a real person or organization
+is directly communicating with the recipient and expects,
+requests, invites, proposes, asks, or would reasonably
+benefit from a response.
+
+Examples:
+
+- Someone asks a question.
+- Someone asks for information.
+- Someone asks the recipient to do something.
+- Someone asks the recipient to respond.
+- Someone proposes a meeting.
+- Someone proposes collaboration.
+- Someone asks for an opinion.
+- Someone says "let me know".
+- Someone asks about availability.
+- Someone sends a project request.
+- Someone sends a work-related request.
+- Someone sends a school-related request.
+- Someone starts a conversation that clearly expects a response.
+
+IMPORTANT:
+
+If the sender is clearly talking directly to the recipient
+and the message requires or invites a response, choose
+"Reply Needed".
+
+Do NOT choose "Other" simply because the email is short,
+casual, informal, or simple.
+
+=========================================================
+IMPORTANT
+=========================================================
+
+Choose "Important" when the email is significant to the
+recipient but does NOT clearly require a direct reply.
+
+Examples:
+
+- Important account information.
+- Important project updates.
+- Important personal updates.
+- Significant work updates.
+- Important announcements.
+
+=========================================================
+NEWSLETTER
+=========================================================
+
+Choose "Newsletter" for recurring informational content.
+
+Examples:
+
+- Newsletters.
+- News digests.
+- Blog subscriptions.
+- Mailing lists.
+- Recurring informational emails.
+
+=========================================================
+PROMOTION
+=========================================================
+
+Choose "Promotion" for marketing or commercial content.
+
+Examples:
+
+- Advertisements.
+- Sales.
+- Discounts.
+- Product offers.
+- Marketing campaigns.
+- Promotional messages.
+
+=========================================================
+NOTIFICATION
+=========================================================
+
+Choose "Notification" for automatically generated messages.
+
+Examples:
+
+- Login notifications.
+- Security alerts.
+- GitHub notifications.
+- Website notifications.
+- Payment notifications.
+- Delivery updates.
+- Service alerts.
+- Automated system messages.
+
+=========================================================
+SPAM
+=========================================================
+
+Choose "Spam" for suspicious, deceptive, malicious,
+or clearly unwanted messages.
+
+=========================================================
+OTHER
+=========================================================
+
+Choose "Other" ONLY when the email does not reasonably
+fit any of the categories above.
+
+=========================================================
+IMPORTANT PRIORITY RULE
+=========================================================
+
+When an email could technically fit multiple categories,
+use this priority:
+
+1. Spam
+2. Reply Needed
+3. Important
+4. Promotion
+5. Newsletter
+6. Notification
+7. Other
+
+A genuine direct request from a person should therefore
+normally be classified as "Reply Needed".
+
+=========================================================
+EMAIL TO CLASSIFY
+=========================================================
 
 Sender:
 {sender}
@@ -1576,7 +1707,23 @@ Subject:
 Body:
 {body[:5000]}
 
-Return ONLY the category name.
+=========================================================
+OUTPUT
+=========================================================
+
+Return ONLY ONE exact category name.
+
+Do not explain your answer.
+
+Valid outputs:
+
+Reply Needed
+Important
+Newsletter
+Promotion
+Notification
+Spam
+Other
 """
 
     try:
@@ -1588,18 +1735,17 @@ Return ONLY the category name.
                 ),
                 messages=[
                     {
-                        "role":
-                            "system",
-
-                        "content":
-                            "You classify emails."
+                        "role": "system",
+                        "content": (
+                            "You are a highly accurate "
+                            "email classification system. "
+                            "Follow the rules exactly. "
+                            "Return only one category."
+                        )
                     },
                     {
-                        "role":
-                            "user",
-
-                        "content":
-                            prompt
+                        "role": "user",
+                        "content": prompt
                     }
                 ],
                 temperature=0
@@ -1614,9 +1760,17 @@ Return ONLY the category name.
             .strip()
         )
 
+        # Remove accidental markdown formatting
+        result = (
+            result
+            .replace("*", "")
+            .replace("`", "")
+            .strip()
+        )
+
         allowed = [
-            "Important",
             "Reply Needed",
+            "Important",
             "Newsletter",
             "Promotion",
             "Notification",
@@ -1624,14 +1778,32 @@ Return ONLY the category name.
             "Other"
         ]
 
+        # Exact match
+        for category in allowed:
+
+            if (
+                result.lower()
+                == category.lower()
+            ):
+
+                return category
+
+        # Fallback if model returned extra text
+        result_lower = result.lower()
+
         for category in allowed:
 
             if (
                 category.lower()
-                == result.lower()
+                in result_lower
             ):
 
                 return category
+
+        print(
+            "UNKNOWN CLASSIFICATION:",
+            result
+        )
 
         return "Other"
 
@@ -1883,11 +2055,17 @@ Original email:
 {body[:10000]}
 
 Rules:
-- Do not invent information.
-- Answer the sender naturally.
+
+- Directly respond to the sender's message.
+- Answer questions when possible.
+- Acknowledge requests.
+- Be natural.
+- Be polite.
 - Keep it reasonably concise.
+- Do not invent information.
+- Do not promise things that were not established.
 - Do not include a subject line.
-- Return only the email body.
+- Return ONLY the email body.
 """
 
         completion = (
