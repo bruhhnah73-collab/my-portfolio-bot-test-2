@@ -2021,3 +2021,14 @@ def health():
     return {
         "status": "healthy"
     }
+@app.get("/debug/google-config")
+def debug_google_config():
+    client_id = GOOGLE_CLIENT_ID or ""
+
+    return {
+        "client_id_loaded": bool(client_id),
+        "client_id_length": len(client_id),
+        "client_id_ending": client_id[-20:] if client_id else None,
+        "secret_loaded": bool(GOOGLE_CLIENT_SECRET),
+        "callback_url": GOOGLE_CALLBACK_URL
+    }
