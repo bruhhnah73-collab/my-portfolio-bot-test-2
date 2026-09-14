@@ -714,12 +714,13 @@ def gmail_auth():
             media_type="application/json"
         )
 
+        # Cross-site OAuth cookie
         response.set_cookie(
             key="oauth_state",
             value=state,
             httponly=True,
             secure=True,
-            samesite="lax",
+            samesite="none",
             max_age=600,
             path="/"
         )
@@ -731,7 +732,7 @@ def gmail_auth():
                 value=flow.code_verifier,
                 httponly=True,
                 secure=True,
-                samesite="lax",
+                samesite="none",
                 max_age=600,
                 path="/"
             )
@@ -816,6 +817,14 @@ def gmail_callback(
         or saved_state != returned_state
     ):
 
+        print(
+            "OAUTH STATE ERROR:",
+            "saved_state exists =",
+            bool(saved_state),
+            "returned_state exists =",
+            bool(returned_state)
+        )
+
         return Response(
             content="Invalid OAuth state",
             status_code=400
@@ -850,8 +859,6 @@ def gmail_callback(
     # -----------------------------------------------------
     # EXCHANGE CODE FOR TOKEN
     # -----------------------------------------------------
-
-   
 
     try:
 
@@ -889,6 +896,7 @@ def gmail_callback(
             ),
             status_code=400
         )
+
     # -----------------------------------------------------
     # SESSION
     # -----------------------------------------------------
@@ -928,24 +936,29 @@ def gmail_callback(
         status_code=303
     )
 
+    # Cross-site Gmail session cookie
     redirect.set_cookie(
         key="gmail_session",
         value=session_id,
         httponly=True,
         secure=True,
-        samesite="lax",
+        samesite="none",
         max_age=60 * 60 * 24 * 30,
         path="/"
     )
 
     redirect.delete_cookie(
         "oauth_state",
-        path="/"
+        path="/",
+        secure=True,
+        samesite="none"
     )
 
     redirect.delete_cookie(
         "oauth_verifier",
-        path="/"
+        path="/",
+        secure=True,
+        samesite="none"
     )
 
     return redirect
@@ -2022,8 +2035,11 @@ def health():
     return {
         "status": "healthy"
     }
+
+
 @app.get("/debug/google-config")
 def debug_google_config():
+
     client_id = GOOGLE_CLIENT_ID or ""
 
     return {
@@ -2033,3 +2049,4 @@ def debug_google_config():
         "secret_loaded": bool(GOOGLE_CLIENT_SECRET),
         "callback_url": GOOGLE_CALLBACK_URL
     }
+
