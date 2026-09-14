@@ -1,4 +1,3 @@
-```python
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
@@ -1547,4 +1546,3 @@ def send_gmail_reply(
             "success": False,
             "message": "Failed to send the email."
         }
-```
