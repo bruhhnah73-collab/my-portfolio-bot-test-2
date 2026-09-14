@@ -851,6 +851,8 @@ def gmail_callback(
     # EXCHANGE CODE FOR TOKEN
     # -----------------------------------------------------
 
+   
+
     try:
 
         flow = create_google_flow(
@@ -883,11 +885,10 @@ def gmail_callback(
 
         return Response(
             content=(
-                "Could not complete Gmail authentication."
+                f"OAUTH TOKEN ERROR: {repr(e)}"
             ),
             status_code=400
         )
-
     # -----------------------------------------------------
     # SESSION
     # -----------------------------------------------------
