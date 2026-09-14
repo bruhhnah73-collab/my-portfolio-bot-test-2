@@ -17,7 +17,24 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request as GoogleRequest
 
 
+# =========================================================
+# APP
+# =========================================================
+
 app = FastAPI()
+
+
+# =========================================================
+# URLS
+# =========================================================
+
+FRONTEND_URL = "https://email-agent-panel.onrender.com"
+
+BACKEND_URL = "https://my-portfolio-bot-test-2.onrender.com"
+
+GOOGLE_CALLBACK_URL = (
+    f"{BACKEND_URL}/gmail/callback"
+)
 
 
 # =========================================================
@@ -26,7 +43,9 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        FRONTEND_URL
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"]
@@ -37,13 +56,34 @@ app.add_middleware(
 # ENVIRONMENT
 # =========================================================
 
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
-GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
-GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
-SUPABASE_DB_URL = os.environ.get("SUPABASE_DB_URL", "").strip()
+GROQ_API_KEY = os.environ.get(
+    "GROQ_API_KEY",
+    ""
+).strip()
+
+GOOGLE_CLIENT_ID = os.environ.get(
+    "GOOGLE_CLIENT_ID",
+    ""
+).strip()
+
+GOOGLE_CLIENT_SECRET = os.environ.get(
+    "GOOGLE_CLIENT_SECRET",
+    ""
+).strip()
+
+SUPABASE_DB_URL = os.environ.get(
+    "SUPABASE_DB_URL",
+    ""
+).strip()
 
 
-client = Groq(api_key=GROQ_API_KEY)
+# =========================================================
+# GROQ
+# =========================================================
+
+client = Groq(
+    api_key=GROQ_API_KEY
+)
 
 
 # =========================================================
@@ -55,6 +95,11 @@ GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.compose"
 ]
 
+
+# =========================================================
+# AGENT
+# =========================================================
+
 agent_enabled = True
 
 
@@ -65,7 +110,11 @@ agent_enabled = True
 def get_db_connection():
 
     if not SUPABASE_DB_URL:
-        print("SUPABASE_DB_URL is not configured.")
+
+        print(
+            "SUPABASE_DB_URL is not configured."
+        )
+
         return None
 
     try:
@@ -77,7 +126,10 @@ def get_db_connection():
 
     except Exception as e:
 
-        print("Database connection error:", e)
+        print(
+            "Database connection error:",
+            e
+        )
 
         return None
 
@@ -110,37 +162,52 @@ def setup_database():
         cursor.close()
         connection.close()
 
-        print("Database ready.")
+        print(
+            "Database ready."
+        )
 
     except Exception as e:
 
-        print("Database setup error:", e)
+        print(
+            "Database setup error:",
+            e
+        )
 
         try:
             connection.close()
-        except:
+        except Exception:
             pass
 
 
 # =========================================================
-# SESSION ID
+# SESSION
 # =========================================================
 
 def get_session_id(request: Request):
 
-    return request.cookies.get("gmail_session")
+    return request.cookies.get(
+        "gmail_session"
+    )
 
 
 def create_session_id():
 
-    return secrets.token_urlsafe(32)
+    return secrets.token_urlsafe(
+        32
+    )
 
 
 # =========================================================
-# SAVE CREDENTIALS
+# SAVE GMAIL CREDENTIALS
 # =========================================================
 
-def save_gmail_credentials(session_id, credentials):
+def save_gmail_credentials(
+    session_id,
+    credentials
+):
+
+    if not session_id:
+        return False
 
     connection = get_db_connection()
 
@@ -161,12 +228,23 @@ def save_gmail_credentials(session_id, credentials):
                 client_secret,
                 scopes
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            VALUES (
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s
+            )
 
             ON CONFLICT (session_id)
             DO UPDATE SET
                 token = EXCLUDED.token,
-                refresh_token = EXCLUDED.refresh_token,
+                refresh_token = COALESCE(
+                    EXCLUDED.refresh_token,
+                    gmail_credentials.refresh_token
+                ),
                 token_uri = EXCLUDED.token_uri,
                 client_id = EXCLUDED.client_id,
                 client_secret = EXCLUDED.client_secret,
@@ -178,7 +256,10 @@ def save_gmail_credentials(session_id, credentials):
             credentials.token_uri,
             credentials.client_id,
             credentials.client_secret,
-            " ".join(credentials.scopes or GMAIL_SCOPES)
+            " ".join(
+                credentials.scopes
+                or GMAIL_SCOPES
+            )
         ))
 
         connection.commit()
@@ -190,21 +271,26 @@ def save_gmail_credentials(session_id, credentials):
 
     except Exception as e:
 
-        print("Could not save Gmail credentials:", e)
+        print(
+            "Could not save Gmail credentials:",
+            e
+        )
 
         try:
             connection.close()
-        except:
+        except Exception:
             pass
 
         return False
 
 
 # =========================================================
-# LOAD CREDENTIALS
+# LOAD GMAIL CREDENTIALS
 # =========================================================
 
-def load_gmail_credentials(session_id):
+def load_gmail_credentials(
+    session_id
+):
 
     if not session_id:
         return None
@@ -226,9 +312,13 @@ def load_gmail_credentials(session_id):
                 client_id,
                 client_secret,
                 scopes
+
             FROM gmail_credentials
+
             WHERE session_id = %s
-        """, (session_id,))
+        """, (
+            session_id,
+        ))
 
         row = cursor.fetchone()
 
@@ -238,12 +328,14 @@ def load_gmail_credentials(session_id):
         if not row:
             return None
 
-        token = row[0]
-        refresh_token = row[1]
-        token_uri = row[2]
-        client_id = row[3]
-        client_secret = row[4]
-        scopes = row[5].split()
+        (
+            token,
+            refresh_token,
+            token_uri,
+            client_id,
+            client_secret,
+            scopes
+        ) = row
 
         credentials = Credentials(
             token=token,
@@ -251,7 +343,7 @@ def load_gmail_credentials(session_id):
             token_uri=token_uri,
             client_id=client_id,
             client_secret=client_secret,
-            scopes=scopes
+            scopes=scopes.split()
         )
 
         if credentials.expired:
@@ -272,21 +364,26 @@ def load_gmail_credentials(session_id):
 
     except Exception as e:
 
-        print("Could not load Gmail credentials:", e)
+        print(
+            "Could not load Gmail credentials:",
+            e
+        )
 
         try:
             connection.close()
-        except:
+        except Exception:
             pass
 
         return None
 
 
 # =========================================================
-# DELETE CREDENTIALS
+# DELETE GMAIL CREDENTIALS
 # =========================================================
 
-def delete_gmail_credentials(session_id):
+def delete_gmail_credentials(
+    session_id
+):
 
     if not session_id:
         return False
@@ -302,8 +399,11 @@ def delete_gmail_credentials(session_id):
 
         cursor.execute("""
             DELETE FROM gmail_credentials
+
             WHERE session_id = %s
-        """, (session_id,))
+        """, (
+            session_id,
+        ))
 
         connection.commit()
 
@@ -314,11 +414,14 @@ def delete_gmail_credentials(session_id):
 
     except Exception as e:
 
-        print("Could not delete Gmail credentials:", e)
+        print(
+            "Could not delete Gmail credentials:",
+            e
+        )
 
         try:
             connection.close()
-        except:
+        except Exception:
             pass
 
         return False
@@ -332,7 +435,7 @@ setup_database()
 
 
 # =========================================================
-# AI INSTRUCTIONS
+# AI SYSTEM INSTRUCTION
 # =========================================================
 
 SYSTEM_INSTRUCTION = """
@@ -384,6 +487,10 @@ Rules:
 """
 
 
+# =========================================================
+# MODELS
+# =========================================================
+
 class ChatRequest(BaseModel):
 
     message: str
@@ -400,14 +507,20 @@ class SendEmailRequest(BaseModel):
 # GMAIL SERVICE
 # =========================================================
 
-def get_gmail_service(request: Request):
+def get_gmail_service(
+    request: Request
+):
 
-    session_id = get_session_id(request)
+    session_id = get_session_id(
+        request
+    )
 
     if not session_id:
         return None
 
-    credentials = load_gmail_credentials(session_id)
+    credentials = load_gmail_credentials(
+        session_id
+    )
 
     if credentials is None:
         return None
@@ -436,7 +549,10 @@ def get_gmail_service(request: Request):
 
     except Exception as e:
 
-        print("Gmail service error:", e)
+        print(
+            "Gmail service error:",
+            e
+        )
 
         return None
 
@@ -446,51 +562,117 @@ def get_gmail_service(request: Request):
 # =========================================================
 
 @app.get("/gmail/auth")
-def gmail_auth(response: Response):
+def gmail_auth():
 
-    flow = Flow.from_client_config(
-        {
-            "web": {
-                "client_id": GOOGLE_CLIENT_ID,
-                "client_secret": GOOGLE_CLIENT_SECRET,
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token"
-            }
-        },
-        scopes=GMAIL_SCOPES
-    )
+    try:
 
-    flow.redirect_uri = (
-        "https://my-portfolio-bot-test-2.onrender.com/gmail/callback"
-    )
+        flow = Flow.from_client_config(
+            {
+                "web": {
+                    "client_id": GOOGLE_CLIENT_ID,
+                    "client_secret": GOOGLE_CLIENT_SECRET,
+                    "auth_uri": (
+                        "https://accounts.google.com/"
+                        "o/oauth2/auth"
+                    ),
+                    "token_uri": (
+                        "https://oauth2.googleapis.com/token"
+                    ),
+                    "redirect_uris": [
+                        GOOGLE_CALLBACK_URL
+                    ]
+                }
+            },
+            scopes=GMAIL_SCOPES
+        )
 
-    authorization_url, state = flow.authorization_url(
-        access_type="offline",
-        include_granted_scopes="true",
-        prompt="consent"
-    )
+        flow.redirect_uri = (
+            GOOGLE_CALLBACK_URL
+        )
 
-    response.set_cookie(
-        key="oauth_state",
-        value=state,
-        httponly=True,
-        secure=True,
-        samesite="lax",
-        max_age=600
-    )
+        authorization_url, state = (
+            flow.authorization_url(
+                access_type="offline",
+                include_granted_scopes="true",
+                prompt="consent"
+            )
+        )
 
-    response.set_cookie(
-        key="oauth_verifier",
-        value=flow.code_verifier,
-        httponly=True,
-        secure=True,
-        samesite="lax",
-        max_age=600
-    )
+        response = Response(
+            content=authorization_url,
+            media_type="text/plain"
+        )
 
-    return {
-        "authorization_url": authorization_url
-    }
+        # OAuth state
+        response.set_cookie(
+            key="oauth_state",
+            value=state,
+            httponly=True,
+            secure=True,
+            samesite="lax",
+            max_age=600,
+            path="/"
+        )
+
+        # PKCE verifier
+        if flow.code_verifier:
+
+            response.set_cookie(
+                key="oauth_verifier",
+                value=flow.code_verifier,
+                httponly=True,
+                secure=True,
+                samesite="lax",
+                max_age=600,
+                path="/"
+            )
+
+        # The frontend expects JSON.
+        response = Response(
+            content=(
+                '{"authorization_url": '
+                f'"{authorization_url.replace(chr(34), chr(92) + chr(34))}"'
+                '}'
+            ),
+            media_type="application/json"
+        )
+
+        response.set_cookie(
+            key="oauth_state",
+            value=state,
+            httponly=True,
+            secure=True,
+            samesite="lax",
+            max_age=600,
+            path="/"
+        )
+
+        if flow.code_verifier:
+
+            response.set_cookie(
+                key="oauth_verifier",
+                value=flow.code_verifier,
+                httponly=True,
+                secure=True,
+                samesite="lax",
+                max_age=600,
+                path="/"
+            )
+
+        return response
+
+    except Exception as e:
+
+        print(
+            "Gmail auth error:",
+            e
+        )
+
+        return {
+            "error": (
+                "Could not start Gmail authentication."
+            )
+        }
 
 
 # =========================================================
@@ -499,65 +681,145 @@ def gmail_auth(response: Response):
 
 @app.get("/gmail/callback")
 def gmail_callback(
-    request: Request,
-    code: str,
-    state: str
+    request: Request
 ):
 
-    saved_state = request.cookies.get("oauth_state")
-    code_verifier = request.cookies.get("oauth_verifier")
+    saved_state = request.cookies.get(
+        "oauth_state"
+    )
 
-    if not saved_state or saved_state != state:
+    code_verifier = request.cookies.get(
+        "oauth_verifier"
+    )
 
-        return {
-            "error": "Invalid OAuth state"
-        }
+    returned_state = request.query_params.get(
+        "state"
+    )
+
+    code = request.query_params.get(
+        "code"
+    )
+
+    error = request.query_params.get(
+        "error"
+    )
+
+    # Google cancelled/denied authorization
+    if error:
+
+        return Response(
+            content=(
+                f"Google authorization failed: {error}"
+            ),
+            status_code=400
+        )
+
+    # Check state
+    if (
+        not saved_state
+        or not returned_state
+        or saved_state != returned_state
+    ):
+
+        print(
+            "OAuth state mismatch."
+        )
+
+        print(
+            "Saved state exists:",
+            bool(saved_state)
+        )
+
+        print(
+            "Returned state exists:",
+            bool(returned_state)
+        )
+
+        return Response(
+            content="Invalid OAuth state",
+            status_code=400
+        )
+
+    if not code:
+
+        return Response(
+            content="Missing OAuth authorization code",
+            status_code=400
+        )
 
     if not code_verifier:
 
-        return {
-            "error": "Missing OAuth code verifier"
-        }
-
-    flow = Flow.from_client_config(
-        {
-            "web": {
-                "client_id": GOOGLE_CLIENT_ID,
-                "client_secret": GOOGLE_CLIENT_SECRET,
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token"
-            }
-        },
-        scopes=GMAIL_SCOPES
-    )
-
-    flow.redirect_uri = (
-        "https://my-portfolio-bot-test-2.onrender.com/gmail/callback"
-    )
-
-    flow.code_verifier = code_verifier
+        return Response(
+            content="Missing OAuth code verifier",
+            status_code=400
+        )
 
     try:
 
-        flow.fetch_token(
-            code=code
+        flow = Flow.from_client_config(
+            {
+                "web": {
+                    "client_id": GOOGLE_CLIENT_ID,
+                    "client_secret": GOOGLE_CLIENT_SECRET,
+                    "auth_uri": (
+                        "https://accounts.google.com/"
+                        "o/oauth2/auth"
+                    ),
+                    "token_uri": (
+                        "https://oauth2.googleapis.com/token"
+                    ),
+                    "redirect_uris": [
+                        GOOGLE_CALLBACK_URL
+                    ]
+                }
+            },
+            scopes=GMAIL_SCOPES,
+            state=saved_state
         )
+
+        flow.redirect_uri = (
+            GOOGLE_CALLBACK_URL
+        )
+
+        flow.code_verifier = code_verifier
+
+        # Use the complete callback URL.
+        authorization_response = str(
+            request.url
+        )
+
+        flow.fetch_token(
+            authorization_response=authorization_response
+        )
+
+        credentials = flow.credentials
 
     except Exception as e:
 
-        print("OAuth token error:", e)
+        print(
+            "OAuth token error:",
+            e
+        )
 
-        return {
-            "error": "Could not complete Gmail authentication."
-        }
+        return Response(
+            content=(
+                "Could not complete Gmail authentication."
+            ),
+            status_code=400
+        )
 
-    credentials = flow.credentials
+    # Get browser session
+    session_id = get_session_id(
+        request
+    )
 
-    session_id = get_session_id(request)
-
+    # Create a new session if this browser
+    # does not already have one.
     if not session_id:
+
         session_id = create_session_id()
 
+    # Save credentials ONLY for this session.
     saved = save_gmail_credentials(
         session_id,
         credentials
@@ -565,25 +827,40 @@ def gmail_callback(
 
     if not saved:
 
-        return {
-            "error": "Could not save Gmail connection."
-        }
+        return Response(
+            content=(
+                "Could not save Gmail connection."
+            ),
+            status_code=500
+        )
 
+    # Redirect back to frontend.
     redirect = RedirectResponse(
-        url="https://email-agent-panel.onrender.com/"
+        url=FRONTEND_URL,
+        status_code=303
     )
 
+    # Gmail session
     redirect.set_cookie(
         key="gmail_session",
         value=session_id,
         httponly=True,
         secure=True,
         samesite="lax",
-        max_age=60 * 60 * 24 * 30
+        max_age=60 * 60 * 24 * 30,
+        path="/"
     )
 
-    redirect.delete_cookie("oauth_state")
-    redirect.delete_cookie("oauth_verifier")
+    # Delete temporary OAuth cookies.
+    redirect.delete_cookie(
+        "oauth_state",
+        path="/"
+    )
+
+    redirect.delete_cookie(
+        "oauth_verifier",
+        path="/"
+    )
 
     return redirect
 
@@ -593,9 +870,13 @@ def gmail_callback(
 # =========================================================
 
 @app.get("/gmail/status")
-def gmail_status(request: Request):
+def gmail_status(
+    request: Request
+):
 
-    session_id = get_session_id(request)
+    session_id = get_session_id(
+        request
+    )
 
     if not session_id:
 
@@ -613,7 +894,6 @@ def gmail_status(request: Request):
             "connected": False
         }
 
-    # Verify that the credentials actually work.
     try:
 
         service = build(
@@ -622,17 +902,26 @@ def gmail_status(request: Request):
             credentials=credentials
         )
 
-        service.users().getProfile(
-            userId="me"
-        ).execute()
+        profile = (
+            service
+            .users()
+            .getProfile(userId="me")
+            .execute()
+        )
 
         return {
-            "connected": True
+            "connected": True,
+            "email": profile.get(
+                "emailAddress"
+            )
         }
 
     except Exception as e:
 
-        print("Gmail status verification failed:", e)
+        print(
+            "Gmail status verification failed:",
+            e
+        )
 
         return {
             "connected": False
@@ -649,14 +938,17 @@ def gmail_disconnect(
     response: Response
 ):
 
-    session_id = get_session_id(request)
+    session_id = get_session_id(
+        request
+    )
 
     success = delete_gmail_credentials(
         session_id
     )
 
     response.delete_cookie(
-        "gmail_session"
+        "gmail_session",
+        path="/"
     )
 
     return {
@@ -670,9 +962,13 @@ def gmail_disconnect(
 # =========================================================
 
 @app.get("/gmail/emails")
-def get_emails(request: Request):
+def get_emails(
+    request: Request
+):
 
-    service = get_gmail_service(request)
+    service = get_gmail_service(
+        request
+    )
 
     if service is None:
 
@@ -683,11 +979,17 @@ def get_emails(request: Request):
 
     try:
 
-        results = service.users().messages().list(
-            userId="me",
-            maxResults=10,
-            labelIds=["INBOX"]
-        ).execute()
+        results = (
+            service
+            .users()
+            .messages()
+            .list(
+                userId="me",
+                maxResults=10,
+                labelIds=["INBOX"]
+            )
+            .execute()
+        )
 
         messages = results.get(
             "messages",
@@ -698,24 +1000,28 @@ def get_emails(request: Request):
 
         for message in messages:
 
-            data = service.users().messages().get(
-                userId="me",
-                id=message["id"],
-                format="metadata",
-                metadataHeaders=[
-                    "From",
-                    "To",
-                    "Subject",
-                    "Date"
-                ]
-            ).execute()
+            data = (
+                service
+                .users()
+                .messages()
+                .get(
+                    userId="me",
+                    id=message["id"],
+                    format="metadata",
+                    metadataHeaders=[
+                        "From",
+                        "To",
+                        "Subject",
+                        "Date"
+                    ]
+                )
+                .execute()
+            )
 
-            headers = data.get(
-                "payload",
-                {}
-            ).get(
-                "headers",
-                []
+            headers = (
+                data
+                .get("payload", {})
+                .get("headers", [])
             )
 
             sender = ""
@@ -725,7 +1031,9 @@ def get_emails(request: Request):
 
             for header in headers:
 
-                name = header["name"].lower()
+                name = header[
+                    "name"
+                ].lower()
 
                 if name == "from":
                     sender = header["value"]
@@ -742,6 +1050,7 @@ def get_emails(request: Request):
             emails.append({
                 "id": message["id"],
                 "from": sender,
+                "sender": sender,
                 "to": recipient,
                 "subject": subject,
                 "date": date,
@@ -758,7 +1067,10 @@ def get_emails(request: Request):
 
     except Exception as e:
 
-        print("Gmail inbox error:", e)
+        print(
+            "Gmail inbox error:",
+            e
+        )
 
         return {
             "connected": False,
@@ -776,7 +1088,9 @@ def get_email(
     request: Request
 ):
 
-    service = get_gmail_service(request)
+    service = get_gmail_service(
+        request
+    )
 
     if service is None:
 
@@ -786,11 +1100,17 @@ def get_email(
 
     try:
 
-        data = service.users().messages().get(
-            userId="me",
-            id=email_id,
-            format="full"
-        ).execute()
+        data = (
+            service
+            .users()
+            .messages()
+            .get(
+                userId="me",
+                id=email_id,
+                format="full"
+            )
+            .execute()
+        )
 
         payload = data.get(
             "payload",
@@ -809,7 +1129,9 @@ def get_email(
 
         for header in headers:
 
-            name = header["name"].lower()
+            name = header[
+                "name"
+            ].lower()
 
             if name == "from":
                 sender = header["value"]
@@ -823,51 +1145,16 @@ def get_email(
             elif name == "date":
                 date = header["value"]
 
-        body = ""
-
-        if "parts" in payload:
-
-            for part in payload["parts"]:
-
-                if part.get("mimeType") == "text/plain":
-
-                    body_data = part.get(
-                        "body",
-                        {}
-                    ).get("data")
-
-                    if body_data:
-
-                        body = base64.urlsafe_b64decode(
-                            body_data
-                        ).decode(
-                            "utf-8",
-                            errors="ignore"
-                        )
-
-                    break
-
-        else:
-
-            body_data = payload.get(
-                "body",
-                {}
-            ).get("data")
-
-            if body_data:
-
-                body = base64.urlsafe_b64decode(
-                    body_data
-                ).decode(
-                    "utf-8",
-                    errors="ignore"
-                )
+        body = extract_email_body(
+            payload
+        )
 
         return {
             "connected": True,
             "email": {
                 "id": email_id,
                 "from": sender,
+                "sender": sender,
                 "to": recipient,
                 "subject": subject,
                 "date": date,
@@ -877,11 +1164,95 @@ def get_email(
 
     except Exception as e:
 
-        print("Get email error:", e)
+        print(
+            "Get email error:",
+            e
+        )
 
         return {
             "connected": False
         }
+
+
+# =========================================================
+# EMAIL BODY HELPER
+# =========================================================
+
+def extract_email_body(
+    payload
+):
+
+    # Direct body
+    body_data = (
+        payload
+        .get("body", {})
+        .get("data")
+    )
+
+    if body_data:
+
+        try:
+
+            return base64.urlsafe_b64decode(
+                body_data
+            ).decode(
+                "utf-8",
+                errors="ignore"
+            )
+
+        except Exception:
+            pass
+
+    # Multipart email
+    parts = payload.get(
+        "parts",
+        []
+    )
+
+    for part in parts:
+
+        mime_type = part.get(
+            "mimeType",
+            ""
+        )
+
+        if mime_type == "text/plain":
+
+            part_data = (
+                part
+                .get("body", {})
+                .get("data")
+            )
+
+            if part_data:
+
+                try:
+
+                    return base64.urlsafe_b64decode(
+                        part_data
+                    ).decode(
+                        "utf-8",
+                        errors="ignore"
+                    )
+
+                except Exception:
+                    pass
+
+        # Nested multipart
+        nested_parts = part.get(
+            "parts"
+        )
+
+        if nested_parts:
+
+            result = extract_email_body(
+                part
+            )
+
+            if result:
+                return result
+
+    return ""
 
 
 # =========================================================
@@ -892,13 +1263,16 @@ def get_email(
 def home():
 
     return {
-        "status": "AI agent backend is running!",
-        "agent_enabled": agent_enabled
+        "status": (
+            "AI agent backend is running!"
+        ),
+        "agent_enabled": agent_enabled,
+        "enabled": agent_enabled
     }
 
 
 # =========================================================
-# AGENT
+# AGENT ON
 # =========================================================
 
 @app.post("/agent/on")
@@ -909,9 +1283,14 @@ def agent_on():
     agent_enabled = True
 
     return {
-        "agent_enabled": True
+        "agent_enabled": True,
+        "enabled": True
     }
 
+
+# =========================================================
+# AGENT OFF
+# =========================================================
 
 @app.post("/agent/off")
 def agent_off():
@@ -921,15 +1300,21 @@ def agent_off():
     agent_enabled = False
 
     return {
-        "agent_enabled": False
+        "agent_enabled": False,
+        "enabled": False
     }
 
+
+# =========================================================
+# AGENT STATUS
+# =========================================================
 
 @app.get("/agent/status")
 def agent_status():
 
     return {
-        "agent_enabled": agent_enabled
+        "agent_enabled": agent_enabled,
+        "enabled": agent_enabled
     }
 
 
@@ -938,13 +1323,16 @@ def agent_status():
 # =========================================================
 
 @app.post("/chat")
-def chat(request: ChatRequest):
+def chat(
+    request: ChatRequest
+):
 
     if not agent_enabled:
 
         return {
             "response": None,
-            "agent_enabled": False
+            "agent_enabled": False,
+            "enabled": False
         }
 
     messages = [
@@ -963,21 +1351,45 @@ def chat(request: ChatRequest):
         "content": request.message
     })
 
-    completion = client.chat.completions.create(
-        model="openai/gpt-oss-20b",
-        messages=messages,
-        temperature=0.6,
-        max_completion_tokens=1024
-    )
+    try:
 
-    return {
-        "response":
-            completion.choices[0]
-            .message
-            .content,
+        completion = (
+            client
+            .chat
+            .completions
+            .create(
+                model="openai/gpt-oss-20b",
+                messages=messages,
+                temperature=0.6,
+                max_completion_tokens=1024
+            )
+        )
 
-        "agent_enabled": True
-    }
+        return {
+            "response": (
+                completion
+                .choices[0]
+                .message
+                .content
+            ),
+            "agent_enabled": True,
+            "enabled": True
+        }
+
+    except Exception as e:
+
+        print(
+            "Chat error:",
+            e
+        )
+
+        return {
+            "response": (
+                "Sorry, I couldn't process that."
+            ),
+            "agent_enabled": True,
+            "enabled": True
+        }
 
 
 # =========================================================
@@ -994,7 +1406,11 @@ def classify_email(
     subject = subject.lower()
     snippet = snippet.lower()
 
-    text = f"{sender} {subject} {snippet}"
+    text = (
+        f"{sender} "
+        f"{subject} "
+        f"{snippet}"
+    )
 
     ignore_words = [
         "verification code",
@@ -1089,12 +1505,18 @@ def classify_email(
 
         return "PROCESS"
 
-    completion = client.chat.completions.create(
-        model="openai/gpt-oss-20b",
-        messages=[
-            {
-                "role": "system",
-                "content": """
+    try:
+
+        completion = (
+            client
+            .chat
+            .completions
+            .create(
+                model="openai/gpt-oss-20b",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": """
 Classify this email.
 
 Return ONLY:
@@ -1136,10 +1558,10 @@ IGNORE:
 
 Return ONLY PROCESS or IGNORE.
 """
-            },
-            {
-                "role": "user",
-                "content": f"""
+                    },
+                    {
+                        "role": "user",
+                        "content": f"""
 From: {sender}
 
 Subject: {subject}
@@ -1147,34 +1569,47 @@ Subject: {subject}
 Email:
 {snippet}
 """
-            }
-        ],
-        temperature=0,
-        max_completion_tokens=10
-    )
+                    }
+                ],
+                temperature=0,
+                max_completion_tokens=10
+            )
+        )
 
-    result = (
-        completion.choices[0]
-        .message
-        .content
-        .strip()
-        .upper()
-    )
+        result = (
+            completion
+            .choices[0]
+            .message
+            .content
+            .strip()
+            .upper()
+        )
 
-    if result == "PROCESS":
-        return "PROCESS"
+        if result == "PROCESS":
+            return "PROCESS"
+
+    except Exception as e:
+
+        print(
+            "Classifier error:",
+            e
+        )
 
     return "IGNORE"
 
 
 # =========================================================
-# FILTER ALL EMAILS
+# FILTER EMAILS
 # =========================================================
 
 @app.get("/gmail/filtered-emails")
-def filtered_emails(request: Request):
+def filtered_emails(
+    request: Request
+):
 
-    service = get_gmail_service(request)
+    service = get_gmail_service(
+        request
+    )
 
     if service is None:
 
@@ -1185,11 +1620,17 @@ def filtered_emails(request: Request):
 
     try:
 
-        results = service.users().messages().list(
-            userId="me",
-            maxResults=10,
-            labelIds=["INBOX"]
-        ).execute()
+        results = (
+            service
+            .users()
+            .messages()
+            .list(
+                userId="me",
+                maxResults=10,
+                labelIds=["INBOX"]
+            )
+            .execute()
+        )
 
         messages = results.get(
             "messages",
@@ -1200,20 +1641,26 @@ def filtered_emails(request: Request):
 
         for message in messages:
 
-            email_id = message["id"]
+            email_id = message[
+                "id"
+            ]
 
-            data = service.users().messages().get(
-                userId="me",
-                id=email_id,
-                format="full"
-            ).execute()
+            data = (
+                service
+                .users()
+                .messages()
+                .get(
+                    userId="me",
+                    id=email_id,
+                    format="full"
+                )
+                .execute()
+            )
 
-            headers = data.get(
-                "payload",
-                {}
-            ).get(
-                "headers",
-                []
+            headers = (
+                data
+                .get("payload", {})
+                .get("headers", [])
             )
 
             sender = ""
@@ -1221,13 +1668,19 @@ def filtered_emails(request: Request):
 
             for header in headers:
 
-                name = header["name"].lower()
+                name = header[
+                    "name"
+                ].lower()
 
                 if name == "from":
-                    sender = header["value"]
+                    sender = header[
+                        "value"
+                    ]
 
                 elif name == "subject":
-                    subject = header["value"]
+                    subject = header[
+                        "value"
+                    ]
 
             snippet = data.get(
                 "snippet",
@@ -1242,10 +1695,19 @@ def filtered_emails(request: Request):
 
             emails.append({
                 "id": email_id,
+
                 "from": sender,
+
+                "sender": sender,
+
                 "subject": subject,
+
                 "snippet": snippet,
-                "classification": classification
+
+                "classification": classification,
+
+                # Used by frontend
+                "action": classification
             })
 
         return {
@@ -1255,7 +1717,10 @@ def filtered_emails(request: Request):
 
     except Exception as e:
 
-        print("Filtered email error:", e)
+        print(
+            "Filtered email error:",
+            e
+        )
 
         return {
             "connected": False,
@@ -1264,7 +1729,7 @@ def filtered_emails(request: Request):
 
 
 # =========================================================
-# GENERATE DRAFT
+# GENERATE EMAIL DRAFT
 # =========================================================
 
 @app.post("/gmail/draft/{email_id}")
@@ -1273,22 +1738,32 @@ def generate_email_draft(
     request: Request
 ):
 
-    service = get_gmail_service(request)
+    service = get_gmail_service(
+        request
+    )
 
     if service is None:
 
         return {
             "connected": False,
-            "error": "Gmail is not connected"
+            "error": (
+                "Gmail is not connected."
+            )
         }
 
     try:
 
-        data = service.users().messages().get(
-            userId="me",
-            id=email_id,
-            format="full"
-        ).execute()
+        data = (
+            service
+            .users()
+            .messages()
+            .get(
+                userId="me",
+                id=email_id,
+                format="full"
+            )
+            .execute()
+        )
 
         payload = data.get(
             "payload",
@@ -1305,60 +1780,34 @@ def generate_email_draft(
 
         for header in headers:
 
-            name = header["name"].lower()
+            name = header[
+                "name"
+            ].lower()
 
             if name == "from":
-                sender = header["value"]
+                sender = header[
+                    "value"
+                ]
 
             elif name == "subject":
-                subject = header["value"]
+                subject = header[
+                    "value"
+                ]
 
-        body = ""
+        body = extract_email_body(
+            payload
+        )
 
-        if "parts" in payload:
-
-            for part in payload["parts"]:
-
-                if part.get("mimeType") == "text/plain":
-
-                    body_data = part.get(
-                        "body",
-                        {}
-                    ).get("data")
-
-                    if body_data:
-
-                        body = base64.urlsafe_b64decode(
-                            body_data
-                        ).decode(
-                            "utf-8",
-                            errors="ignore"
-                        )
-
-                    break
-
-        else:
-
-            body_data = payload.get(
-                "body",
-                {}
-            ).get("data")
-
-            if body_data:
-
-                body = base64.urlsafe_b64decode(
-                    body_data
-                ).decode(
-                    "utf-8",
-                    errors="ignore"
-                )
-
-        completion = client.chat.completions.create(
-            model="openai/gpt-oss-20b",
-            messages=[
-                {
-                    "role": "system",
-                    "content": """
+        completion = (
+            client
+            .chat
+            .completions
+            .create(
+                model="openai/gpt-oss-20b",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": """
 You write email replies for the creator of a portfolio.
 
 Write a natural and helpful reply.
@@ -1379,10 +1828,10 @@ Rules:
 - Do not include a subject line.
 - Return ONLY the email reply.
 """
-                },
-                {
-                    "role": "user",
-                    "content": f"""
+                    },
+                    {
+                        "role": "user",
+                        "content": f"""
 From:
 {sender}
 
@@ -1392,14 +1841,16 @@ Subject:
 Email:
 {body}
 """
-                }
-            ],
-            temperature=0.6,
-            max_completion_tokens=500
+                    }
+                ],
+                temperature=0.6,
+                max_completion_tokens=500
+            )
         )
 
         draft = (
-            completion.choices[0]
+            completion
+            .choices[0]
             .message
             .content
             .strip()
@@ -1408,17 +1859,23 @@ Email:
         return {
             "email_id": email_id,
             "from": sender,
+            "sender": sender,
             "subject": subject,
             "draft": draft
         }
 
     except Exception as e:
 
-        print("Draft generation error:", e)
+        print(
+            "Draft generation error:",
+            e
+        )
 
         return {
-            "connected": False,
-            "error": "Could not generate draft."
+            "connected": True,
+            "error": (
+                "Could not generate draft."
+            )
         }
 
 
@@ -1443,27 +1900,42 @@ def send_gmail_reply(
 
         return {
             "success": False,
-            "message": "Gmail is not connected."
+            "message": (
+                "Gmail is not connected."
+            )
+        }
+
+    if not draft.strip():
+
+        return {
+            "success": False,
+            "message": (
+                "Draft cannot be empty."
+            )
         }
 
     try:
 
-        original = service.users().messages().get(
-            userId="me",
-            id=email_id,
-            format="metadata",
-            metadataHeaders=[
-                "From",
-                "Subject"
-            ]
-        ).execute()
+        original = (
+            service
+            .users()
+            .messages()
+            .get(
+                userId="me",
+                id=email_id,
+                format="metadata",
+                metadataHeaders=[
+                    "From",
+                    "Subject"
+                ]
+            )
+            .execute()
+        )
 
-        headers = original.get(
-            "payload",
-            {}
-        ).get(
-            "headers",
-            []
+        headers = (
+            original
+            .get("payload", {})
+            .get("headers", [])
         )
 
         sender = ""
@@ -1471,38 +1943,51 @@ def send_gmail_reply(
 
         for header in headers:
 
-            if header["name"].lower() == "from":
-                sender = header["value"]
+            name = header[
+                "name"
+            ].lower()
 
-            elif header["name"].lower() == "subject":
-                subject = header["value"]
+            if name == "from":
+
+                sender = header[
+                    "value"
+                ]
+
+            elif name == "subject":
+
+                subject = header[
+                    "value"
+                ]
 
         if not sender:
 
             return {
                 "success": False,
-                "message": "Could not find the sender."
+                "message": (
+                    "Could not find the sender."
+                )
             }
 
-        if not draft.strip():
+        if not subject.lower().startswith(
+            "re:"
+        ):
 
-            return {
-                "success": False,
-                "message": "Draft cannot be empty."
-            }
+            subject = (
+                f"Re: {subject}"
+            )
 
-        if not subject.lower().startswith("re:"):
-
-            subject = f"Re: {subject}"
-
+        # Escape HTML safely.
         html_draft = (
             draft
             .replace("&", "&amp;")
             .replace("<", "&lt;")
             .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&#039;")
             .replace("\n", "<br>")
         )
 
+        # Optional markdown bold
         html_draft = re.sub(
             r"\*\*(.*?)\*\*",
             r"<strong>\1</strong>",
@@ -1517,32 +2002,53 @@ def send_gmail_reply(
         message["To"] = sender
         message["Subject"] = subject
 
-        encoded_message = base64.urlsafe_b64encode(
-            message.as_bytes()
-        ).decode()
+        encoded_message = (
+            base64
+            .urlsafe_b64encode(
+                message.as_bytes()
+            )
+            .decode()
+        )
 
         send_message = {
             "raw": encoded_message,
-            "threadId": original.get("threadId")
+            "threadId": original.get(
+                "threadId"
+            )
         }
 
-        sent = service.users().messages().send(
-            userId="me",
-            body=send_message
-        ).execute()
+        sent = (
+            service
+            .users()
+            .messages()
+            .send(
+                userId="me",
+                body=send_message
+            )
+            .execute()
+        )
 
         return {
             "success": True,
-            "message": "Reply sent successfully.",
+            "message": (
+                "Reply sent successfully."
+            ),
             "email_id": email_id,
-            "sent_message_id": sent.get("id")
+            "sent_message_id": sent.get(
+                "id"
+            )
         }
 
     except Exception as e:
 
-        print("Gmail send error:", e)
+        print(
+            "Gmail send error:",
+            e
+        )
 
         return {
             "success": False,
-            "message": "Failed to send the email."
+            "message": (
+                "Failed to send the email."
+            )
         }
