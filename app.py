@@ -68,6 +68,8 @@ GROQ_API_KEY = os.getenv(
 DATABASE_URL = os.getenv(
     "DATABASE_URL"
 )
+
+
 # =========================================================
 # DATABASE DEBUG
 # =========================================================
@@ -103,6 +105,7 @@ else:
     print(
         "DB DEBUG: DATABASE_URL IS MISSING"
     )
+
 
 GOOGLE_CLIENT_ID = os.getenv(
     "GOOGLE_CLIENT_ID"
@@ -151,17 +154,72 @@ agent_enabled = True
 def get_db_connection():
 
     if not DATABASE_URL:
+
         print(
             "DATABASE_URL is missing."
         )
+
         return None
 
     try:
 
-        return psycopg2.connect(
-            DATABASE_URL,
-            sslmode="require"
+        from urllib.parse import urlparse, unquote
 
+        db_url = urlparse(
+            DATABASE_URL
+        )
+
+        host = db_url.hostname
+
+        port = (
+            db_url.port
+            or 5432
+        )
+
+        user = unquote(
+            db_url.username or ""
+        )
+
+        password = unquote(
+            db_url.password or ""
+        )
+
+        database = (
+            db_url.path
+            or "/postgres"
+        ).lstrip("/")
+
+        print(
+            "DB CONNECTION TEST"
+        )
+
+        print(
+            "HOST:",
+            host
+        )
+
+        print(
+            "PORT:",
+            port
+        )
+
+        print(
+            "USER:",
+            user
+        )
+
+        print(
+            "DATABASE:",
+            database
+        )
+
+        return psycopg2.connect(
+            host=host,
+            port=port,
+            user=user,
+            password=password,
+            dbname=database,
+            sslmode="require"
         )
 
     except Exception as e:
@@ -220,8 +278,10 @@ def init_database():
         )
 
         try:
+
             conn.rollback()
             conn.close()
+
         except Exception:
             pass
 
@@ -364,8 +424,10 @@ def save_gmail_credentials(
         if conn:
 
             try:
+
                 conn.rollback()
                 conn.close()
+
             except Exception:
                 pass
 
@@ -445,8 +507,10 @@ def load_gmail_credentials(
             scopes=scopes
         )
 
-        # Refresh expired credentials
-        if credentials.expired and credentials.refresh_token:
+        if (
+            credentials.expired
+            and credentials.refresh_token
+        ):
 
             try:
 
@@ -528,8 +592,10 @@ def delete_gmail_credentials(
         )
 
         try:
+
             conn.rollback()
             conn.close()
+
         except Exception:
             pass
 
@@ -751,7 +817,6 @@ def gmail_auth():
             media_type="application/json"
         )
 
-        # Cross-site OAuth cookie
         response.set_cookie(
             key="oauth_state",
             value=state,
@@ -830,10 +895,6 @@ def gmail_callback(
         )
     )
 
-    # -----------------------------------------------------
-    # GOOGLE ERROR
-    # -----------------------------------------------------
-
     if error:
 
         return Response(
@@ -843,10 +904,6 @@ def gmail_callback(
             ),
             status_code=400
         )
-
-    # -----------------------------------------------------
-    # STATE CHECK
-    # -----------------------------------------------------
 
     if (
         not saved_state
@@ -867,10 +924,6 @@ def gmail_callback(
             status_code=400
         )
 
-    # -----------------------------------------------------
-    # CODE CHECK
-    # -----------------------------------------------------
-
     if not code:
 
         return Response(
@@ -880,10 +933,6 @@ def gmail_callback(
             status_code=400
         )
 
-    # -----------------------------------------------------
-    # VERIFIER CHECK
-    # -----------------------------------------------------
-
     if not code_verifier:
 
         return Response(
@@ -892,10 +941,6 @@ def gmail_callback(
             ),
             status_code=400
         )
-
-    # -----------------------------------------------------
-    # EXCHANGE CODE FOR TOKEN
-    # -----------------------------------------------------
 
     try:
 
@@ -934,10 +979,6 @@ def gmail_callback(
             status_code=400
         )
 
-    # -----------------------------------------------------
-    # SESSION
-    # -----------------------------------------------------
-
     session_id = get_session_id(
         request
     )
@@ -945,10 +986,6 @@ def gmail_callback(
     if not session_id:
 
         session_id = create_session_id()
-
-    # -----------------------------------------------------
-    # SAVE
-    # -----------------------------------------------------
 
     saved = save_gmail_credentials(
         session_id,
@@ -964,16 +1001,11 @@ def gmail_callback(
             status_code=500
         )
 
-    # -----------------------------------------------------
-    # REDIRECT
-    # -----------------------------------------------------
-
     redirect = RedirectResponse(
         url=FRONTEND_URL,
         status_code=303
     )
 
-    # Cross-site Gmail session cookie
     redirect.set_cookie(
         key="gmail_session",
         value=session_id,
@@ -1594,7 +1626,10 @@ Return ONLY the category name.
 
         for category in allowed:
 
-            if category.lower() == result.lower():
+            if (
+                category.lower()
+                == result.lower()
+            ):
 
                 return category
 
@@ -2016,10 +2051,13 @@ def send_email(
             "threadId"
         )
 
-        raw_message = base64.urlsafe_b64encode(
-            mime_message.as_bytes()
-        ).decode(
-            "utf-8"
+        raw_message = (
+            base64.urlsafe_b64encode(
+                mime_message.as_bytes()
+            )
+            .decode(
+                "utf-8"
+            )
         )
 
         send_body = {
@@ -2074,16 +2112,33 @@ def health():
     }
 
 
+# =========================================================
+# GOOGLE CONFIG DEBUG
+# =========================================================
+
 @app.get("/debug/google-config")
 def debug_google_config():
 
-    client_id = GOOGLE_CLIENT_ID or ""
+    client_id = (
+        GOOGLE_CLIENT_ID
+        or ""
+    )
 
     return {
-        "client_id_loaded": bool(client_id),
-        "client_id_length": len(client_id),
-        "client_id_ending": client_id[-20:] if client_id else None,
-        "secret_loaded": bool(GOOGLE_CLIENT_SECRET),
-        "callback_url": GOOGLE_CALLBACK_URL
-    }
+        "client_id_loaded":
+            bool(client_id),
 
+        "client_id_length":
+            len(client_id),
+
+        "client_id_ending":
+            client_id[-20:]
+            if client_id
+            else None,
+
+        "secret_loaded":
+            bool(GOOGLE_CLIENT_SECRET),
+
+        "callback_url":
+            GOOGLE_CALLBACK_URL
+    }
