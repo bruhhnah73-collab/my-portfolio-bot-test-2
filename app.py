@@ -5,21 +5,20 @@ from pydantic import BaseModel
 from groq import Groq
 from email.mime.text import MIMEText
 
-from google_auth_oauthlib.flow import Flow
-from googleapiclient.discovery import build
-from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request as GoogleRequest
-
 import os
 import base64
 import re
 import secrets
 import json
+import hashlib
 import time
 import threading
-import hashlib
 import psycopg2
-from psycopg2.extras import RealDictCursor
+
+from google_auth_oauthlib.flow import Flow
+from googleapiclient.discovery import build
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request as GoogleRequest
 
 
 # =========================================================
@@ -34,7 +33,9 @@ app = FastAPI()
 # =========================================================
 
 FRONTEND_URL = "https://email-agent-panel.onrender.com"
+
 BACKEND_URL = "https://my-portfolio-bot-test-2.onrender.com"
+
 GOOGLE_CALLBACK_URL = f"{BACKEND_URL}/gmail/callback"
 
 
@@ -55,16 +56,30 @@ app.add_middleware(
 # ENVIRONMENT
 # =========================================================
 
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
-GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
-GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
-DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 
 
 # =========================================================
-# GMAIL SETTINGS
+# GROQ
+# =========================================================
+
+groq_client = (
+    Groq(api_key=GROQ_API_KEY)
+    if GROQ_API_KEY
+    else None
+)
+
+CLASSIFIER_MODEL = "openai/gpt-oss-20b"
+
+CHAT_MODEL = "openai/gpt-oss-120b"
+
+
+# =========================================================
+# GMAIL
 # =========================================================
 
 GMAIL_SCOPES = [
@@ -75,93 +90,25 @@ GMAIL_SCOPES = [
 
 
 # =========================================================
-# AGENT
+# AGENT STATE
 # =========================================================
 
 agent_enabled = True
 
 
 # =========================================================
-# CLASSIFIER SAFETY
+# CLASSIFIER RATE LIMIT PROTECTION
 # =========================================================
+
+CLASSIFIER_MAX_AI_CALLS_PER_REFRESH = 6
+
+CLASSIFIER_MIN_INTERVAL = 1.0
 
 classifier_lock = threading.Lock()
-classifier_backoff_until = 0
 
+last_classifier_call = 0.0
 
-# =========================================================
-# AI CHAT INSTRUCTIONS
-# =========================================================
-
-SYSTEM_INSTRUCTION = """
-You are an AI assistant representing the creator of this portfolio.
-
-The creator builds and experiments with AI, web development, and technology.
-
-Projects:
-
-1. School Admin Dashboard - 2026
-Built using Replit.
-A functional administrative login portal and dashboard data interface.
-
-2. School Landing Page - 2026
-Built using Visual Studio Code.
-A clean, fully responsive multi-page website built for a real school.
-
-3. My First AI Chatbox - 2026
-Built using Ziper AI.
-An AI chatbox that provides information about the portfolio and projects.
-
-4. Custom Python AI Chatbot
-Built using Python, Streamlit, and Visual Studio Code.
-A custom portfolio assistant featuring real-time response streaming.
-
-Never invent information about the creator.
-Respond naturally and conversationally.
-"""
-
-
-# =========================================================
-# MODELS
-# =========================================================
-
-class ChatRequest(BaseModel):
-    message: str
-    conversation: list[dict] = []
-
-
-class SendEmailRequest(BaseModel):
-    body: str | None = None
-    draft: str | None = None
-
-
-# =========================================================
-# SESSION COOKIE
-# =========================================================
-
-@app.middleware("http")
-async def session_middleware(request: Request, call_next):
-
-    session_id = request.cookies.get("gmail_session")
-
-    if not session_id:
-        session_id = secrets.token_urlsafe(32)
-
-    request.state.session_id = session_id
-
-    response = await call_next(request)
-
-    if not request.cookies.get("gmail_session"):
-        response.set_cookie(
-            key="gmail_session",
-            value=session_id,
-            httponly=True,
-            secure=True,
-            samesite="none",
-            max_age=60 * 60 * 24 * 30
-        )
-
-    return response
+classifier_backoff_until = 0.0
 
 
 # =========================================================
@@ -171,188 +118,454 @@ async def session_middleware(request: Request, call_next):
 def get_db_connection():
 
     if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL is not configured.")
+        print("DATABASE_URL is missing.")
+        return None
 
-    from urllib.parse import urlparse
+    try:
 
-    parsed = urlparse(DATABASE_URL)
+        from urllib.parse import urlparse, unquote
 
-    host = parsed.hostname
-    port = parsed.port or 5432
-    user = parsed.username
-    password = parsed.password
-    database = parsed.path.lstrip("/")
+        db_url = urlparse(DATABASE_URL)
 
-    print("DB DEBUG HOST:", host)
-    print("DB DEBUG PORT:", port)
-    print("DB DEBUG USER:", user)
-    print("DB DEBUG DATABASE:", database)
+        host = db_url.hostname
+        port = db_url.port or 5432
 
-    return psycopg2.connect(
-        host=host,
-        port=port,
-        user=user,
-        password=password,
-        database=database,
-        sslmode="require"
-    )
+        user = unquote(
+            db_url.username or ""
+        )
 
+        password = unquote(
+            db_url.password or ""
+        )
+
+        database = (
+            db_url.path or "/postgres"
+        ).lstrip("/")
+
+        return psycopg2.connect(
+            host=host,
+            port=port,
+            user=user,
+            password=password,
+            dbname=database,
+            sslmode="require"
+        )
+
+    except Exception as e:
+
+        print(
+            "DATABASE CONNECTION ERROR:",
+            repr(e)
+        )
+
+        return None
+
+
+# =========================================================
+# DATABASE INITIALIZATION
+# =========================================================
 
 def init_database():
 
     conn = get_db_connection()
-    cur = conn.cursor()
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS gmail_credentials (
-            session_id TEXT PRIMARY KEY,
-            token TEXT NOT NULL,
-            refresh_token TEXT,
-            token_uri TEXT NOT NULL,
-            client_id TEXT NOT NULL,
-            client_secret TEXT NOT NULL,
-            scopes TEXT NOT NULL
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS email_classifications (
-            session_id TEXT NOT NULL,
-            email_id TEXT NOT NULL,
-            fingerprint TEXT NOT NULL,
-            classification TEXT NOT NULL,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (session_id, email_id)
-        )
-    """)
-
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    print("Database initialized.")
-
-
-@app.on_event("startup")
-def startup():
+    if not conn:
+        return
 
     try:
-        print("DB CONNECTION TEST")
 
-        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # -------------------------------------------------
+        # Gmail credentials
+        # -------------------------------------------------
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS gmail_credentials (
+                session_id TEXT PRIMARY KEY,
+                token TEXT NOT NULL,
+                refresh_token TEXT,
+                token_uri TEXT NOT NULL,
+                client_id TEXT NOT NULL,
+                client_secret TEXT NOT NULL,
+                scopes TEXT NOT NULL
+            )
+        """)
+
+        # -------------------------------------------------
+        # Email classification cache
+        # -------------------------------------------------
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS email_classifications (
+                session_id TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                classification TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (session_id, message_id)
+            )
+        """)
+
+        conn.commit()
+
+        cur.close()
         conn.close()
 
         print("Database initialized.")
-        init_database()
 
     except Exception as e:
-        print("DATABASE ERROR:", repr(e))
+
+        print(
+            "DATABASE INIT ERROR:",
+            repr(e)
+        )
+
+        try:
+            conn.rollback()
+            conn.close()
+        except Exception:
+            pass
 
 
 # =========================================================
-# GMAIL CREDENTIAL STORAGE
+# STARTUP
 # =========================================================
 
-def save_credentials(session_id, credentials):
+@app.on_event("startup")
+def startup_event():
+
+    init_database()
+
+
+# =========================================================
+# SESSION
+# =========================================================
+
+def create_session_id():
+
+    return secrets.token_urlsafe(32)
+
+
+def get_session_id(request: Request):
+
+    return request.cookies.get(
+        "gmail_session"
+    )
+
+
+# =========================================================
+# SAVE GMAIL CREDENTIALS
+# =========================================================
+
+def save_gmail_credentials(
+    session_id,
+    credentials
+):
+
+    conn = None
+
+    try:
+
+        conn = get_db_connection()
+
+        if not conn:
+            return False
+
+        cur = conn.cursor()
+
+        scopes = json.dumps(
+            credentials.scopes
+            or GMAIL_SCOPES
+        )
+
+        cur.execute("""
+            INSERT INTO gmail_credentials (
+                session_id,
+                token,
+                refresh_token,
+                token_uri,
+                client_id,
+                client_secret,
+                scopes
+            )
+            VALUES (%s,%s,%s,%s,%s,%s,%s)
+
+            ON CONFLICT (session_id)
+
+            DO UPDATE SET
+                token = EXCLUDED.token,
+                refresh_token = EXCLUDED.refresh_token,
+                token_uri = EXCLUDED.token_uri,
+                client_id = EXCLUDED.client_id,
+                client_secret = EXCLUDED.client_secret,
+                scopes = EXCLUDED.scopes
+        """, (
+            session_id,
+            credentials.token,
+            credentials.refresh_token,
+            credentials.token_uri,
+            credentials.client_id,
+            credentials.client_secret,
+            scopes
+        ))
+
+        conn.commit()
+
+        cur.close()
+        conn.close()
+
+        return True
+
+    except Exception as e:
+
+        print(
+            "SAVE GMAIL CREDENTIALS ERROR:",
+            repr(e)
+        )
+
+        if conn:
+
+            try:
+                conn.rollback()
+                conn.close()
+            except Exception:
+                pass
+
+        return False
+
+
+# =========================================================
+# LOAD GMAIL CREDENTIALS
+# =========================================================
+
+def load_gmail_credentials(session_id):
+
+    if not session_id:
+        return None
 
     conn = get_db_connection()
-    cur = conn.cursor()
 
-    scopes = credentials.scopes or GMAIL_SCOPES
+    if not conn:
+        return None
 
-    cur.execute("""
-        INSERT INTO gmail_credentials (
+    try:
+
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT
+                token,
+                refresh_token,
+                token_uri,
+                client_id,
+                client_secret,
+                scopes
+            FROM gmail_credentials
+            WHERE session_id = %s
+        """, (
             session_id,
+        ))
+
+        row = cur.fetchone()
+
+        cur.close()
+        conn.close()
+
+        if not row:
+            return None
+
+        (
             token,
             refresh_token,
             token_uri,
             client_id,
             client_secret,
             scopes
+        ) = row
+
+        try:
+
+            scopes = json.loads(
+                scopes
+            )
+
+        except Exception:
+
+            scopes = GMAIL_SCOPES
+
+        credentials = Credentials(
+            token=token,
+            refresh_token=refresh_token,
+            token_uri=token_uri,
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=scopes
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (session_id)
-        DO UPDATE SET
-            token = EXCLUDED.token,
-            refresh_token = EXCLUDED.refresh_token,
-            token_uri = EXCLUDED.token_uri,
-            client_id = EXCLUDED.client_id,
-            client_secret = EXCLUDED.client_secret,
-            scopes = EXCLUDED.scopes
-    """, (
-        session_id,
-        credentials.token,
-        credentials.refresh_token,
-        credentials.token_uri,
-        credentials.client_id,
-        credentials.client_secret,
-        json.dumps(scopes)
-    ))
 
-    conn.commit()
-    cur.close()
-    conn.close()
+        if (
+            credentials.expired
+            and credentials.refresh_token
+        ):
 
+            try:
 
-def load_credentials(session_id):
+                credentials.refresh(
+                    GoogleRequest()
+                )
 
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
+                save_gmail_credentials(
+                    session_id,
+                    credentials
+                )
 
-    cur.execute("""
-        SELECT *
-        FROM gmail_credentials
-        WHERE session_id = %s
-    """, (session_id,))
+            except Exception as e:
 
-    row = cur.fetchone()
+                print(
+                    "TOKEN REFRESH ERROR:",
+                    repr(e)
+                )
 
-    cur.close()
-    conn.close()
+        return credentials
 
-    if not row:
+    except Exception as e:
+
+        print(
+            "LOAD GMAIL CREDENTIALS ERROR:",
+            repr(e)
+        )
+
+        try:
+            conn.close()
+        except Exception:
+            pass
+
         return None
 
-    try:
-        scopes = json.loads(row["scopes"])
-    except Exception:
-        scopes = GMAIL_SCOPES
 
-    credentials = Credentials(
-        token=row["token"],
-        refresh_token=row["refresh_token"],
-        token_uri=row["token_uri"],
-        client_id=row["client_id"],
-        client_secret=row["client_secret"],
-        scopes=scopes
+# =========================================================
+# DELETE GMAIL CREDENTIALS
+# =========================================================
+
+def delete_gmail_credentials(
+    session_id
+):
+
+    if not session_id:
+        return False
+
+    conn = get_db_connection()
+
+    if not conn:
+        return False
+
+    try:
+
+        cur = conn.cursor()
+
+        cur.execute("""
+            DELETE FROM gmail_credentials
+            WHERE session_id = %s
+        """, (
+            session_id,
+        ))
+
+        cur.execute("""
+            DELETE FROM email_classifications
+            WHERE session_id = %s
+        """, (
+            session_id,
+        ))
+
+        conn.commit()
+
+        cur.close()
+        conn.close()
+
+        return True
+
+    except Exception as e:
+
+        print(
+            "DELETE GMAIL CREDENTIALS ERROR:",
+            repr(e)
+        )
+
+        try:
+            conn.rollback()
+            conn.close()
+        except Exception:
+            pass
+
+        return False
+
+
+# =========================================================
+# GOOGLE OAUTH
+# =========================================================
+
+def create_google_flow(
+    state=None
+):
+
+    config = {
+
+        "web": {
+
+            "client_id":
+                GOOGLE_CLIENT_ID,
+
+            "client_secret":
+                GOOGLE_CLIENT_SECRET,
+
+            "auth_uri":
+                "https://accounts.google.com/o/oauth2/auth",
+
+            "token_uri":
+                "https://oauth2.googleapis.com/token",
+
+            "redirect_uris": [
+                GOOGLE_CALLBACK_URL
+            ]
+        }
+    }
+
+    flow = Flow.from_client_config(
+        config,
+        scopes=GMAIL_SCOPES,
+        state=state
     )
 
-    return credentials
+    flow.redirect_uri = (
+        GOOGLE_CALLBACK_URL
+    )
+
+    return flow
 
 
 # =========================================================
 # GMAIL SERVICE
 # =========================================================
 
-def get_gmail_service(request: Request):
+def get_gmail_service(
+    request: Request
+):
 
-    session_id = request.state.session_id
+    session_id = get_session_id(
+        request
+    )
 
-    credentials = load_credentials(session_id)
+    if not session_id:
+        return None
 
-    if credentials is None:
+    credentials = load_gmail_credentials(
+        session_id
+    )
+
+    if not credentials:
         return None
 
     try:
-
-        if credentials.expired and credentials.refresh_token:
-
-            credentials.refresh(GoogleRequest())
-
-            save_credentials(
-                session_id,
-                credentials
-            )
 
         return build(
             "gmail",
@@ -362,400 +575,51 @@ def get_gmail_service(request: Request):
 
     except Exception as e:
 
-        print("GMAIL SERVICE ERROR:", repr(e))
+        print(
+            "GMAIL SERVICE ERROR:",
+            repr(e)
+        )
 
         return None
 
 
 # =========================================================
-# GMAIL AUTH
+# AI SYSTEM INSTRUCTION
 # =========================================================
 
-@app.get("/gmail/auth")
-def gmail_auth(request: Request, response: Response):
+SYSTEM_INSTRUCTION = """
+You are an AI email assistant.
 
-    flow = Flow.from_client_config(
-        {
-            "web": {
-                "client_id": GOOGLE_CLIENT_ID,
-                "client_secret": GOOGLE_CLIENT_SECRET,
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token"
-            }
-        },
-        scopes=GMAIL_SCOPES
-    )
+Your job is to help the user understand,
+classify, draft, and respond to emails.
 
-    flow.redirect_uri = GOOGLE_CALLBACK_URL
+Be concise, professional, and useful.
 
-    authorization_url, state = flow.authorization_url(
-        access_type="offline",
-        include_granted_scopes="true",
-        prompt="consent"
-    )
+Never invent facts that are not present
+in the email or conversation.
 
-    response.set_cookie(
-        key="oauth_state",
-        value=state,
-        httponly=True,
-        secure=True,
-        samesite="none",
-        max_age=600
-    )
-
-    response.set_cookie(
-        key="oauth_verifier",
-        value=flow.code_verifier,
-        httponly=True,
-        secure=True,
-        samesite="none",
-        max_age=600
-    )
-
-    response.headers["Location"] = authorization_url
-
-    return {
-        "authorization_url": authorization_url
-    }
+When drafting replies:
+- Be natural.
+- Be polite.
+- Match the context.
+- Do not add unnecessary information.
+"""
 
 
 # =========================================================
-# GMAIL CALLBACK
+# REQUEST MODELS
 # =========================================================
 
-@app.get("/gmail/callback")
-def gmail_callback(
-    request: Request,
-    code: str,
-    state: str
-):
+class ChatRequest(BaseModel):
 
-    saved_state = request.cookies.get("oauth_state")
-    code_verifier = request.cookies.get("oauth_verifier")
+    message: str
 
-    if not saved_state or saved_state != state:
-        return {
-            "error": "Invalid OAuth state"
-        }
+    history: list = []
 
-    if not code_verifier:
-        return {
-            "error": "Missing OAuth code verifier"
-        }
 
-    flow = Flow.from_client_config(
-        {
-            "web": {
-                "client_id": GOOGLE_CLIENT_ID,
-                "client_secret": GOOGLE_CLIENT_SECRET,
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token"
-            }
-        },
-        scopes=GMAIL_SCOPES
-    )
+class DraftRequest(BaseModel):
 
-    flow.redirect_uri = GOOGLE_CALLBACK_URL
-    flow.code_verifier = code_verifier
-
-    flow.fetch_token(code=code)
-
-    credentials = flow.credentials
-
-    save_credentials(
-        request.state.session_id,
-        credentials
-    )
-
-    redirect = RedirectResponse(
-        url=f"{FRONTEND_URL}/"
-    )
-
-    redirect.delete_cookie("oauth_state")
-    redirect.delete_cookie("oauth_verifier")
-
-    return redirect
-
-
-# =========================================================
-# GMAIL STATUS
-# =========================================================
-
-@app.get("/gmail/status")
-def gmail_status(request: Request):
-
-    credentials = load_credentials(
-        request.state.session_id
-    )
-
-    if credentials is None:
-        return {
-            "connected": False,
-            "email": None,
-            "messages_total": 0,
-            "threads_total": 0
-        }
-
-    try:
-
-        service = get_gmail_service(request)
-
-        if service is None:
-            return {
-                "connected": False,
-                "email": None,
-                "messages_total": 0,
-                "threads_total": 0
-            }
-
-        profile = service.users().getProfile(
-            userId="me"
-        ).execute()
-
-        return {
-            "connected": True,
-            "email": profile.get("emailAddress"),
-            "messages_total": profile.get("messagesTotal", 0),
-            "threads_total": profile.get("threadsTotal", 0)
-        }
-
-    except Exception as e:
-
-        print("GMAIL STATUS ERROR:", repr(e))
-
-        return {
-            "connected": False,
-            "email": None,
-            "messages_total": 0,
-            "threads_total": 0
-        }
-
-
-# =========================================================
-# GET INBOX EMAILS
-# =========================================================
-
-@app.get("/gmail/inbox")
-def get_inbox(
-    request: Request,
-    max_results: int = 20
-):
-
-    service = get_gmail_service(request)
-
-    if service is None:
-        return {
-            "connected": False,
-            "emails": []
-        }
-
-    max_results = max(
-        1,
-        min(max_results, 50)
-    )
-
-    results = service.users().messages().list(
-        userId="me",
-        maxResults=max_results,
-        labelIds=["INBOX"]
-    ).execute()
-
-    messages = results.get(
-        "messages",
-        []
-    )
-
-    emails = []
-
-    for message in messages:
-
-        try:
-
-            data = service.users().messages().get(
-                userId="me",
-                id=message["id"],
-                format="metadata",
-                metadataHeaders=[
-                    "From",
-                    "To",
-                    "Subject",
-                    "Date"
-                ]
-            ).execute()
-
-            headers = data.get(
-                "payload",
-                {}
-            ).get(
-                "headers",
-                []
-            )
-
-            sender = ""
-            recipient = ""
-            subject = ""
-            date = ""
-
-            for header in headers:
-
-                name = header["name"].lower()
-
-                if name == "from":
-                    sender = header["value"]
-
-                elif name == "to":
-                    recipient = header["value"]
-
-                elif name == "subject":
-                    subject = header["value"]
-
-                elif name == "date":
-                    date = header["value"]
-
-            emails.append({
-                "id": message["id"],
-                "from": sender,
-                "to": recipient,
-                "subject": subject,
-                "date": date,
-                "snippet": data.get("snippet", "")
-            })
-
-        except Exception as e:
-
-            print(
-                "INBOX EMAIL ERROR:",
-                message["id"],
-                repr(e)
-            )
-
-    return {
-        "connected": True,
-        "emails": emails
-    }
-
-
-# =========================================================
-# GET ONE EMAIL
-# =========================================================
-
-def extract_email_body(payload):
-
-    body = ""
-
-    if "parts" in payload:
-
-        for part in payload["parts"]:
-
-            if part.get("mimeType") == "text/plain":
-
-                body_data = part.get(
-                    "body",
-                    {}
-                ).get("data")
-
-                if body_data:
-
-                    body = base64.urlsafe_b64decode(
-                        body_data
-                    ).decode(
-                        "utf-8",
-                        errors="ignore"
-                    )
-
-                break
-
-            if part.get("parts"):
-
-                nested = extract_email_body(
-                    part
-                )
-
-                if nested:
-                    return nested
-
-    else:
-
-        body_data = payload.get(
-            "body",
-            {}
-        ).get("data")
-
-        if body_data:
-
-            body = base64.urlsafe_b64decode(
-                body_data
-            ).decode(
-                "utf-8",
-                errors="ignore"
-            )
-
-    return body
-
-
-@app.get("/gmail/email/{email_id}")
-def get_email(
-    request: Request,
-    email_id: str
-):
-
-    service = get_gmail_service(request)
-
-    if service is None:
-        return {
-            "connected": False
-        }
-
-    data = service.users().messages().get(
-        userId="me",
-        id=email_id,
-        format="full"
-    ).execute()
-
-    payload = data.get(
-        "payload",
-        {}
-    )
-
-    headers = payload.get(
-        "headers",
-        []
-    )
-
-    sender = ""
-    recipient = ""
-    subject = ""
-    date = ""
-
-    for header in headers:
-
-        name = header["name"].lower()
-
-        if name == "from":
-            sender = header["value"]
-
-        elif name == "to":
-            recipient = header["value"]
-
-        elif name == "subject":
-            subject = header["value"]
-
-        elif name == "date":
-            date = header["value"]
-
-    body = extract_email_body(payload)
-
-    return {
-        "connected": True,
-        "email": {
-            "id": email_id,
-            "from": sender,
-            "to": recipient,
-            "subject": subject,
-            "date": date,
-            "body": body
-        }
-    }
+    instructions: str = ""
 
 
 # =========================================================
@@ -766,8 +630,32 @@ def get_email(
 def home():
 
     return {
-        "status": "AI agent backend is running!",
-        "agent_enabled": agent_enabled
+
+        "status":
+            "online",
+
+        "service":
+            "Email AI Agent",
+
+        "gmail":
+            True
+    }
+
+
+# =========================================================
+# AGENT STATUS
+# =========================================================
+
+@app.get("/agent/status")
+def agent_status():
+
+    return {
+
+        "enabled":
+            agent_enabled,
+
+        "agent_enabled":
+            agent_enabled
     }
 
 
@@ -783,7 +671,15 @@ def agent_on():
     agent_enabled = True
 
     return {
-        "agent_enabled": True
+
+        "success":
+            True,
+
+        "enabled":
+            True,
+
+        "agent_enabled":
+            True
     }
 
 
@@ -799,673 +695,429 @@ def agent_off():
     agent_enabled = False
 
     return {
-        "agent_enabled": False
+
+        "success":
+            True,
+
+        "enabled":
+            False,
+
+        "agent_enabled":
+            False
     }
 
 
 # =========================================================
-# AGENT STATUS
+# GMAIL AUTH
 # =========================================================
 
-@app.get("/agent/status")
-def agent_status():
-
-    return {
-        "agent_enabled": agent_enabled
-    }
-
-
-# =========================================================
-# AI CHAT
-# =========================================================
-
-@app.post("/chat")
-def chat(request: ChatRequest):
-
-    if not agent_enabled:
-
-        return {
-            "response": None,
-            "agent_enabled": False
-        }
-
-    if client is None:
-
-        return {
-            "response": "AI service is not configured.",
-            "agent_enabled": True
-        }
-
-    messages = [
-        {
-            "role": "system",
-            "content": SYSTEM_INSTRUCTION
-        }
-    ]
-
-    messages.extend(
-        request.conversation
-    )
-
-    messages.append({
-        "role": "user",
-        "content": request.message
-    })
+@app.get("/gmail/auth")
+def gmail_auth():
 
     try:
 
-        completion = client.chat.completions.create(
-            model="openai/gpt-oss-120b",
-            messages=messages,
-            temperature=0.6,
-            max_completion_tokens=1024
+        flow = create_google_flow()
+
+        authorization_url, state = (
+            flow.authorization_url(
+
+                access_type="offline",
+
+                include_granted_scopes="true",
+
+                prompt="consent"
+            )
+        )
+
+        response = Response(
+
+            content=json.dumps({
+
+                "authorization_url":
+                    authorization_url
+
+            }),
+
+            media_type=
+                "application/json"
+        )
+
+        response.set_cookie(
+
+            key="oauth_state",
+
+            value=state,
+
+            httponly=True,
+
+            secure=True,
+
+            samesite="none",
+
+            max_age=600,
+
+            path="/"
+        )
+
+        if flow.code_verifier:
+
+            response.set_cookie(
+
+                key="oauth_verifier",
+
+                value=flow.code_verifier,
+
+                httponly=True,
+
+                secure=True,
+
+                samesite="none",
+
+                max_age=600,
+
+                path="/"
+            )
+
+        return response
+
+    except Exception as e:
+
+        print(
+            "GMAIL AUTH ERROR:",
+            repr(e)
+        )
+
+        return Response(
+
+            content=json.dumps({
+
+                "error":
+                    "Could not start Gmail authentication."
+
+            }),
+
+            media_type=
+                "application/json",
+
+            status_code=500
+        )
+
+
+# =========================================================
+# GMAIL CALLBACK
+# =========================================================
+
+@app.get("/gmail/callback")
+def gmail_callback(
+    request: Request
+):
+
+    saved_state = request.cookies.get(
+        "oauth_state"
+    )
+
+    code_verifier = request.cookies.get(
+        "oauth_verifier"
+    )
+
+    returned_state = request.query_params.get(
+        "state"
+    )
+
+    code = request.query_params.get(
+        "code"
+    )
+
+    error = request.query_params.get(
+        "error"
+    )
+
+    if error:
+
+        return Response(
+
+            content=
+                f"Google authorization failed: {error}",
+
+            status_code=400
+        )
+
+    if (
+        not saved_state
+        or not returned_state
+        or saved_state != returned_state
+    ):
+
+        return Response(
+
+            content=
+                "Invalid OAuth state",
+
+            status_code=400
+        )
+
+    if not code:
+
+        return Response(
+
+            content=
+                "Missing OAuth authorization code",
+
+            status_code=400
+        )
+
+    if not code_verifier:
+
+        return Response(
+
+            content=
+                "Missing OAuth code verifier",
+
+            status_code=400
+        )
+
+    try:
+
+        flow = create_google_flow(
+            state=saved_state
+        )
+
+        flow.redirect_uri = (
+            GOOGLE_CALLBACK_URL
+        )
+
+        flow.code_verifier = (
+            code_verifier
+        )
+
+        flow.fetch_token(
+            authorization_response=
+                str(request.url)
+        )
+
+        credentials = flow.credentials
+
+    except Exception as e:
+
+        print(
+            "OAUTH TOKEN ERROR:",
+            repr(e)
+        )
+
+        return Response(
+
+            content=
+                f"OAUTH TOKEN ERROR: {repr(e)}",
+
+            status_code=400
+        )
+
+    session_id = get_session_id(
+        request
+    )
+
+    if not session_id:
+
+        session_id = create_session_id()
+
+    saved = save_gmail_credentials(
+        session_id,
+        credentials
+    )
+
+    if not saved:
+
+        return Response(
+
+            content=
+                "Could not save Gmail connection.",
+
+            status_code=500
+        )
+
+    redirect = RedirectResponse(
+
+        url=FRONTEND_URL,
+
+        status_code=303
+    )
+
+    redirect.set_cookie(
+
+        key="gmail_session",
+
+        value=session_id,
+
+        httponly=True,
+
+        secure=True,
+
+        samesite="none",
+
+        max_age=60 * 60 * 24 * 30,
+
+        path="/"
+    )
+
+    redirect.delete_cookie(
+        "oauth_state",
+        path="/",
+        secure=True,
+        samesite="none"
+    )
+
+    redirect.delete_cookie(
+        "oauth_verifier",
+        path="/",
+        secure=True,
+        samesite="none"
+    )
+
+    return redirect
+
+
+# =========================================================
+# GMAIL STATUS
+# =========================================================
+
+@app.get("/gmail/status")
+def gmail_status(
+    request: Request
+):
+
+    service = get_gmail_service(
+        request
+    )
+
+    if not service:
+
+        return {
+            "connected":
+                False
+        }
+
+    try:
+
+        profile = (
+            service.users()
+            .getProfile(
+                userId="me"
+            )
+            .execute()
         )
 
         return {
-            "response": completion.choices[0].message.content,
-            "agent_enabled": True
+
+            "connected":
+                True,
+
+            "email":
+                profile.get(
+                    "emailAddress"
+                ),
+
+            "messages_total":
+                profile.get(
+                    "messagesTotal"
+                ),
+
+            "threads_total":
+                profile.get(
+                    "threadsTotal"
+                )
         }
 
     except Exception as e:
 
-        print("CHAT ERROR:", repr(e))
+        print(
+            "GMAIL STATUS ERROR:",
+            repr(e)
+        )
 
         return {
-            "response": "The AI service is temporarily unavailable.",
-            "agent_enabled": True
+            "connected":
+                False
         }
 
 
 # =========================================================
-# LOCAL EMAIL CLASSIFICATION
+# GMAIL DISCONNECT
 # =========================================================
 
-def local_classification(
-    sender,
-    subject,
-    snippet
-):
-
-    sender = (sender or "").lower()
-    subject = (subject or "").lower()
-    snippet = (snippet or "").lower()
-
-    text = f"{sender} {subject} {snippet}"
-
-    # SPAM
-    spam_words = [
-        "you have won",
-        "winner",
-        "claim your prize",
-        "free money",
-        "casino",
-        "lottery",
-        "get rich",
-        "urgent opportunity",
-        "viagra"
-    ]
-
-    if any(word in text for word in spam_words):
-        return "Spam"
-
-
-    # NEWSLETTERS
-    newsletter_words = [
-        "newsletter",
-        "unsubscribe",
-        "weekly digest",
-        "daily digest",
-        "monthly digest",
-        "mailing list",
-        "email preferences",
-        "view this email in your browser"
-    ]
-
-    if any(word in text for word in newsletter_words):
-        return "Newsletter"
-
-
-    # PROMOTIONS
-    promotion_words = [
-        "sale",
-        "discount",
-        "off today",
-        "limited time",
-        "special offer",
-        "coupon",
-        "promo code",
-        "promotion",
-        "deal",
-        "shop now",
-        "buy now"
-    ]
-
-    if any(word in text for word in promotion_words):
-        return "Promotion"
-
-
-    # AUTOMATED NOTIFICATIONS
-    notification_words = [
-        "verification code",
-        "authentication code",
-        "sudo authentication",
-        "password reset",
-        "reset your password",
-        "security alert",
-        "verify your identity",
-        "confirm your email",
-        "confirm your account",
-        "account verification",
-        "login code",
-        "one-time password",
-        "otp",
-        "deploy failed",
-        "deploy succeeded",
-        "is live:",
-        "third-party oauth",
-        "oauth application",
-        "github notification",
-        "gitlab notification",
-        "render notification",
-        "build failed",
-        "build succeeded",
-        "deployment"
-    ]
-
-    if any(word in text for word in notification_words):
-        return "Notification"
-
-
-    # IMPORTANT / REPLY SIGNALS
-    important_words = [
-        "urgent",
-        "important",
-        "action required",
-        "please respond",
-        "need your help",
-        "can you help",
-        "are you available",
-        "let me know",
-        "could you",
-        "would you",
-        "can you",
-        "collaboration",
-        "project inquiry",
-        "project collaboration"
-    ]
-
-    if any(word in text for word in important_words):
-        return "Reply Needed"
-
-
-    # OBVIOUS HUMAN QUESTIONS
-    if "?" in text:
-
-        human_words = [
-            "hi ",
-            "hello",
-            "hey ",
-            "thanks",
-            "thank you",
-            "could you",
-            "can you",
-            "would you",
-            "are you",
-            "let me know"
-        ]
-
-        if any(word in text for word in human_words):
-            return "Reply Needed"
-
-
-    return None
-
-
-# =========================================================
-# CLASSIFICATION CACHE
-# =========================================================
-
-def make_email_fingerprint(
-    sender,
-    subject,
-    snippet
-):
-
-    raw = (
-        f"{sender.strip()}\n"
-        f"{subject.strip()}\n"
-        f"{snippet.strip()}"
-    )
-
-    return hashlib.sha256(
-        raw.encode("utf-8")
-    ).hexdigest()
-
-
-def get_cached_classification(
-    session_id,
-    email_id,
-    fingerprint
-):
-
-    conn = get_db_connection()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT classification
-        FROM email_classifications
-        WHERE session_id = %s
-        AND email_id = %s
-        AND fingerprint = %s
-    """, (
-        session_id,
-        email_id,
-        fingerprint
-    ))
-
-    row = cur.fetchone()
-
-    cur.close()
-    conn.close()
-
-    if row:
-        return row[0]
-
-    return None
-
-
-def save_classification(
-    session_id,
-    email_id,
-    fingerprint,
-    classification
-):
-
-    conn = get_db_connection()
-    cur = conn.cursor()
-
-    cur.execute("""
-        INSERT INTO email_classifications (
-            session_id,
-            email_id,
-            fingerprint,
-            classification,
-            updated_at
-        )
-        VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
-        ON CONFLICT (session_id, email_id)
-        DO UPDATE SET
-            fingerprint = EXCLUDED.fingerprint,
-            classification = EXCLUDED.classification,
-            updated_at = CURRENT_TIMESTAMP
-    """, (
-        session_id,
-        email_id,
-        fingerprint,
-        classification
-    ))
-
-    conn.commit()
-
-    cur.close()
-    conn.close()
-
-
-# =========================================================
-# RATE LIMIT HANDLING
-# =========================================================
-
-def get_rate_limit_wait(error):
-
-    message = str(error)
-
-    match = re.search(
-        r"try again in ([0-9.]+)s",
-        message,
-        re.IGNORECASE
-    )
-
-    if match:
-
-        try:
-            return float(
-                match.group(1)
-            )
-
-        except Exception:
-            pass
-
-    return 5
-
-
-# =========================================================
-# AI CLASSIFIER
-# =========================================================
-
-def ai_classification(
-    sender,
-    subject,
-    snippet
-):
-
-    global classifier_backoff_until
-
-    if client is None:
-        return "Other"
-
-    now = time.time()
-
-    if now < classifier_backoff_until:
-        return "Other"
-
-
-    classifier_prompt = """
-Classify this email into exactly ONE category.
-
-Categories:
-Important
-Reply Needed
-Newsletter
-Promotion
-Notification
-Spam
-Other
-
-Reply Needed = a real person likely expects a response.
-
-Important = meaningful email that matters but does not clearly require a reply.
-
-Newsletter = recurring informational mailing.
-
-Promotion = marketing, sales, discounts, offers.
-
-Notification = automated system/service notification.
-
-Spam = obvious unwanted or suspicious bulk email.
-
-Other = anything that does not clearly fit.
-
-Return ONLY the category name.
-"""
-
-
-    user_prompt = f"""
-From: {sender}
-Subject: {subject}
-Email: {snippet}
-"""
-
-
-    with classifier_lock:
-
-        if time.time() < classifier_backoff_until:
-            return "Other"
-
-        try:
-
-            completion = client.chat.completions.create(
-                model="openai/gpt-oss-120b",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": classifier_prompt
-                    },
-                    {
-                        "role": "user",
-                        "content": user_prompt
-                    }
-                ],
-                temperature=0,
-                max_completion_tokens=20
-            )
-
-            result = (
-                completion.choices[0]
-                .message
-                .content
-                .strip()
-            )
-
-            result = result.replace(
-                "*",
-                ""
-            ).strip()
-
-            valid_categories = {
-                "Important",
-                "Reply Needed",
-                "Newsletter",
-                "Promotion",
-                "Notification",
-                "Spam",
-                "Other"
-            }
-
-            if result in valid_categories:
-                return result
-
-            normalized = result.lower()
-
-            for category in valid_categories:
-
-                if category.lower() in normalized:
-                    return category
-
-            return "Other"
-
-
-        except Exception as e:
-
-            error_text = str(e)
-
-            if "429" in error_text or "rate_limit" in error_text.lower():
-
-                wait_time = get_rate_limit_wait(
-                    e
-                )
-
-                classifier_backoff_until = (
-                    time.time()
-                    + min(
-                        max(wait_time, 2),
-                        30
-                    )
-                )
-
-                print(
-                    "CLASSIFIER RATE LIMIT - "
-                    f"backing off for {wait_time:.2f}s"
-                )
-
-                return "Other"
-
-
-            print(
-                "CLASSIFIER ERROR:",
-                repr(e)
-            )
-
-            return "Other"
-
-
-# =========================================================
-# MAIN CLASSIFIER
-# =========================================================
-
-def classify_email(
-    session_id,
-    email_id,
-    sender,
-    subject,
-    snippet
-):
-
-    fingerprint = make_email_fingerprint(
-        sender,
-        subject,
-        snippet
-    )
-
-
-    # -----------------------------------------------------
-    # 1. DATABASE CACHE
-    # -----------------------------------------------------
-
-    cached = get_cached_classification(
-        session_id,
-        email_id,
-        fingerprint
-    )
-
-    if cached:
-        return cached
-
-
-    # -----------------------------------------------------
-    # 2. LOCAL CLASSIFICATION
-    # -----------------------------------------------------
-
-    local_result = local_classification(
-        sender,
-        subject,
-        snippet
-    )
-
-    if local_result:
-
-        save_classification(
-            session_id,
-            email_id,
-            fingerprint,
-            local_result
-        )
-
-        return local_result
-
-
-    # -----------------------------------------------------
-    # 3. AI CLASSIFICATION
-    # -----------------------------------------------------
-
-    result = ai_classification(
-        sender,
-        subject,
-        snippet
-    )
-
-
-    # -----------------------------------------------------
-    # 4. ONLY CACHE REAL AI RESULTS
-    # -----------------------------------------------------
-
-    if result != "Other" or time.time() >= classifier_backoff_until:
-
-        save_classification(
-            session_id,
-            email_id,
-            fingerprint,
-            result
-        )
-
-
-    return result
-
-
-# =========================================================
-# FILTER ONE EMAIL
-# =========================================================
-
-@app.post("/gmail/filter/{email_id}")
-def filter_email(
+@app.post("/gmail/disconnect")
+def gmail_disconnect(
     request: Request,
-    email_id: str
+    response: Response
 ):
 
-    service = get_gmail_service(request)
-
-    if service is None:
-        return {
-            "connected": False
-        }
-
-    data = service.users().messages().get(
-        userId="me",
-        id=email_id,
-        format="full"
-    ).execute()
-
-    headers = data.get(
-        "payload",
-        {}
-    ).get(
-        "headers",
-        []
+    session_id = get_session_id(
+        request
     )
 
-    sender = ""
-    subject = ""
+    if session_id:
 
-    for header in headers:
+        delete_gmail_credentials(
+            session_id
+        )
 
-        name = header["name"].lower()
-
-        if name == "from":
-            sender = header["value"]
-
-        elif name == "subject":
-            subject = header["value"]
-
-    snippet = data.get(
-        "snippet",
-        ""
-    )
-
-    classification = classify_email(
-        request.state.session_id,
-        email_id,
-        sender,
-        subject,
-        snippet
+    response.delete_cookie(
+        "gmail_session",
+        path="/"
     )
 
     return {
-        "email_id": email_id,
-        "classification": classification
+
+        "success":
+            True,
+
+        "connected":
+            False
     }
 
 
 # =========================================================
-# FILTER ALL EMAILS
+# GMAIL INBOX
 # =========================================================
 
-@app.get("/gmail/filtered-emails")
-def filtered_emails(
+@app.get("/gmail/inbox")
+def gmail_inbox(
     request: Request,
     max_results: int = 20
 ):
 
-    service = get_gmail_service(request)
-
-    if service is None:
-        return {
-            "connected": False,
-            "emails": []
-        }
-
-    max_results = max(
-        1,
-        min(max_results, 50)
+    service = get_gmail_service(
+        request
     )
+
+    if not service:
+
+        return {
+
+            "connected":
+                False,
+
+            "emails":
+                []
+        }
 
     try:
 
-        results = service.users().messages().list(
-            userId="me",
-            maxResults=max_results,
-            labelIds=["INBOX"]
-        ).execute()
+        result = (
+            service.users()
+            .messages()
+            .list(
 
-        messages = results.get(
+                userId="me",
+
+                labelIds=["INBOX"],
+
+                maxResults=max_results
+
+            )
+            .execute()
+        )
+
+        messages = result.get(
             "messages",
             []
         )
@@ -1474,75 +1126,1677 @@ def filtered_emails(
 
         for message in messages:
 
-            email_id = message["id"]
-
             try:
 
-                data = service.users().messages().get(
-                    userId="me",
-                    id=email_id,
-                    format="full"
-                ).execute()
+                data = (
+                    service.users()
+                    .messages()
+                    .get(
 
-                headers = data.get(
-                    "payload",
-                    {}
-                ).get(
-                    "headers",
-                    []
+                        userId="me",
+
+                        id=message["id"],
+
+                        format="metadata",
+
+                        metadataHeaders=[
+                            "From",
+                            "To",
+                            "Subject",
+                            "Date"
+                        ]
+
+                    )
+                    .execute()
                 )
 
-                sender = ""
-                subject = ""
-                date = ""
-
-                for header in headers:
-
-                    name = header["name"].lower()
-
-                    if name == "from":
-                        sender = header["value"]
-
-                    elif name == "subject":
-                        subject = header["value"]
-
-                    elif name == "date":
-                        date = header["value"]
-
-                snippet = data.get(
-                    "snippet",
-                    ""
+                headers = (
+                    data
+                    .get("payload", {})
+                    .get("headers", [])
                 )
 
-                classification = classify_email(
-                    request.state.session_id,
-                    email_id,
-                    sender,
-                    subject,
-                    snippet
-                )
+                header_map = {
+
+                    h["name"].lower():
+                        h["value"]
+
+                    for h in headers
+                }
 
                 emails.append({
-                    "id": email_id,
-                    "from": sender,
-                    "subject": subject,
-                    "date": date,
-                    "snippet": snippet,
-                    "classification": classification
+
+                    "id":
+                        data.get("id"),
+
+                    "threadId":
+                        data.get("threadId"),
+
+                    "sender":
+                        header_map.get(
+                            "from",
+                            ""
+                        ),
+
+                    "from":
+                        header_map.get(
+                            "from",
+                            ""
+                        ),
+
+                    "to":
+                        header_map.get(
+                            "to",
+                            ""
+                        ),
+
+                    "subject":
+                        header_map.get(
+                            "subject",
+                            "(No subject)"
+                        ),
+
+                    "date":
+                        header_map.get(
+                            "date",
+                            ""
+                        ),
+
+                    "snippet":
+                        data.get(
+                            "snippet",
+                            ""
+                        )
                 })
 
             except Exception as e:
 
                 print(
-                    "FILTER EMAIL ERROR:",
-                    email_id,
+                    "EMAIL READ ERROR:",
                     repr(e)
                 )
 
         return {
-            "connected": True,
-            "emails": emails
+
+            "connected":
+                True,
+
+            "emails":
+                emails
         }
+
+    except Exception as e:
+
+        print(
+            "INBOX ERROR:",
+            repr(e)
+        )
+
+        return {
+
+            "connected":
+                True,
+
+            "emails":
+                [],
+
+            "error":
+                str(e)
+        }
+
+
+# =========================================================
+# EXTRACT EMAIL BODY
+# =========================================================
+
+def extract_email_body(
+    payload
+):
+
+    if not payload:
+        return ""
+
+    mime_type = payload.get(
+        "mimeType",
+        ""
+    )
+
+    body = payload.get(
+        "body",
+        {}
+    )
+
+    data = body.get(
+        "data"
+    )
+
+    if data:
+
+        try:
+
+            decoded = (
+                base64.urlsafe_b64decode(
+                    data + "=="
+                )
+            )
+
+            text = decoded.decode(
+                "utf-8",
+                errors="ignore"
+            )
+
+            if mime_type == "text/html":
+
+                text = re.sub(
+                    r"<[^>]+>",
+                    " ",
+                    text
+                )
+
+            return text.strip()
+
+        except Exception:
+
+            pass
+
+    for part in payload.get(
+        "parts",
+        []
+    ):
+
+        result = extract_email_body(
+            part
+        )
+
+        if result:
+            return result
+
+    return ""
+
+
+# =========================================================
+# GET SINGLE EMAIL
+# =========================================================
+
+@app.get("/gmail/email/{message_id}")
+def get_email(
+    message_id: str,
+    request: Request
+):
+
+    service = get_gmail_service(
+        request
+    )
+
+    if not service:
+
+        return {
+
+            "error":
+                "Gmail not connected"
+        }
+
+    try:
+
+        message = (
+            service.users()
+            .messages()
+            .get(
+
+                userId="me",
+
+                id=message_id,
+
+                format="full"
+
+            )
+            .execute()
+        )
+
+        payload = message.get(
+            "payload",
+            {}
+        )
+
+        headers = payload.get(
+            "headers",
+            []
+        )
+
+        header_map = {
+
+            h["name"].lower():
+                h["value"]
+
+            for h in headers
+
+        }
+
+        return {
+
+            "id":
+                message.get("id"),
+
+            "threadId":
+                message.get("threadId"),
+
+            "sender":
+                header_map.get(
+                    "from",
+                    ""
+                ),
+
+            "from":
+                header_map.get(
+                    "from",
+                    ""
+                ),
+
+            "to":
+                header_map.get(
+                    "to",
+                    ""
+                ),
+
+            "subject":
+                header_map.get(
+                    "subject",
+                    "(No subject)"
+                ),
+
+            "date":
+                header_map.get(
+                    "date",
+                    ""
+                ),
+
+            "snippet":
+                message.get(
+                    "snippet",
+                    ""
+                ),
+
+            "body":
+                extract_email_body(
+                    payload
+                )
+        }
+
+    except Exception as e:
+
+        print(
+            "GET EMAIL ERROR:",
+            repr(e)
+        )
+
+        return {
+            "error":
+                str(e)
+        }
+
+
+# =========================================================
+# CHAT
+# =========================================================
+
+@app.post("/chat")
+def chat(
+    request_data: ChatRequest
+):
+
+    if not groq_client:
+
+        return {
+
+            "reply":
+                "Groq API is not configured."
+        }
+
+    try:
+
+        messages = [
+
+            {
+                "role":
+                    "system",
+
+                "content":
+                    SYSTEM_INSTRUCTION
+            }
+
+        ]
+
+        for item in request_data.history:
+
+            if (
+                isinstance(item, dict)
+                and "role" in item
+                and "content" in item
+            ):
+
+                messages.append({
+
+                    "role":
+                        item["role"],
+
+                    "content":
+                        item["content"]
+                })
+
+        messages.append({
+
+            "role":
+                "user",
+
+            "content":
+                request_data.message
+        })
+
+        completion = (
+            groq_client
+            .chat
+            .completions
+            .create(
+
+                model=CHAT_MODEL,
+
+                messages=messages,
+
+                temperature=0.3
+            )
+        )
+
+        return {
+
+            "reply":
+                completion
+                .choices[0]
+                .message
+                .content
+        }
+
+    except Exception as e:
+
+        print(
+            "CHAT ERROR:",
+            repr(e)
+        )
+
+        return {
+
+            "reply":
+                "AI error occurred."
+        }
+
+
+# =========================================================
+# EMAIL CONTENT HASH
+# =========================================================
+
+def get_email_content_hash(
+    sender,
+    subject,
+    body
+):
+
+    content = (
+
+        sender.strip()
+
+        + "\n"
+
+        + subject.strip()
+
+        + "\n"
+
+        + body.strip()
+
+    )
+
+    return hashlib.sha256(
+
+        content.encode(
+            "utf-8",
+            errors="ignore"
+        )
+
+    ).hexdigest()
+
+
+# =========================================================
+# CLASSIFICATION CACHE READ
+# =========================================================
+
+def get_cached_classification(
+    session_id,
+    message_id,
+    content_hash
+):
+
+    if not session_id:
+        return None
+
+    conn = get_db_connection()
+
+    if not conn:
+        return None
+
+    try:
+
+        cur = conn.cursor()
+
+        cur.execute("""
+
+            SELECT
+                classification,
+                content_hash
+
+            FROM email_classifications
+
+            WHERE session_id = %s
+
+            AND message_id = %s
+
+        """, (
+            session_id,
+            message_id
+        ))
+
+        row = cur.fetchone()
+
+        cur.close()
+        conn.close()
+
+        if not row:
+            return None
+
+        classification, saved_hash = row
+
+        if saved_hash != content_hash:
+
+            return None
+
+        return classification
+
+    except Exception as e:
+
+        print(
+            "CACHE READ ERROR:",
+            repr(e)
+        )
+
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+        return None
+
+
+# =========================================================
+# CLASSIFICATION CACHE SAVE
+# =========================================================
+
+def save_classification(
+    session_id,
+    message_id,
+    content_hash,
+    classification
+):
+
+    if not session_id:
+        return
+
+    if not classification:
+        return
+
+    conn = get_db_connection()
+
+    if not conn:
+        return
+
+    try:
+
+        cur = conn.cursor()
+
+        cur.execute("""
+
+            INSERT INTO email_classifications (
+                session_id,
+                message_id,
+                content_hash,
+                classification,
+                updated_at
+            )
+
+            VALUES (
+                %s,
+                %s,
+                %s,
+                %s,
+                CURRENT_TIMESTAMP
+            )
+
+            ON CONFLICT (
+                session_id,
+                message_id
+            )
+
+            DO UPDATE SET
+
+                content_hash =
+                    EXCLUDED.content_hash,
+
+                classification =
+                    EXCLUDED.classification,
+
+                updated_at =
+                    CURRENT_TIMESTAMP
+
+        """, (
+
+            session_id,
+            message_id,
+            content_hash,
+            classification
+
+        ))
+
+        conn.commit()
+
+        cur.close()
+        conn.close()
+
+    except Exception as e:
+
+        print(
+            "CACHE SAVE ERROR:",
+            repr(e)
+        )
+
+        try:
+
+            conn.rollback()
+            conn.close()
+
+        except Exception:
+            pass
+
+
+# =========================================================
+# DETERMINISTIC CLASSIFIER
+# =========================================================
+
+def deterministic_classification(
+    sender,
+    subject,
+    body
+):
+
+    text = (
+        sender
+        + " "
+        + subject
+        + " "
+        + body
+    ).lower()
+
+    sender_lower = sender.lower()
+
+    subject_lower = subject.lower()
+
+    body_lower = body.lower()
+
+
+    # -----------------------------------------------------
+    # SPAM
+    # -----------------------------------------------------
+
+    spam_words = [
+
+        "you won",
+        "you have won",
+        "claim your prize",
+        "lottery winner",
+        "casino",
+        "free money",
+        "urgent payment",
+        "verify your account immediately",
+        "bitcoin investment",
+        "crypto investment"
+
+    ]
+
+    for word in spam_words:
+
+        if word in text:
+
+            return "Spam"
+
+
+    # -----------------------------------------------------
+    # PROMOTION
+    # -----------------------------------------------------
+
+    promotion_words = [
+
+        "sale",
+        "discount",
+        "coupon",
+        "limited time offer",
+        "special offer",
+        "promo",
+        "promotion",
+        "shop now",
+        "buy now",
+        "% off",
+        "exclusive deal",
+        "flash sale",
+        "save today"
+
+    ]
+
+    for word in promotion_words:
+
+        if word in text:
+
+            return "Promotion"
+
+
+    # -----------------------------------------------------
+    # NEWSLETTER
+    # -----------------------------------------------------
+
+    newsletter_words = [
+
+        "newsletter",
+        "weekly digest",
+        "monthly digest",
+        "daily digest",
+        "weekly update",
+        "monthly update",
+        "news update"
+
+    ]
+
+    for word in newsletter_words:
+
+        if word in text:
+
+            return "Newsletter"
+
+
+    # -----------------------------------------------------
+    # NOTIFICATION
+    # -----------------------------------------------------
+
+    notification_sender_words = [
+
+        "no-reply",
+        "noreply",
+        "do-not-reply"
+
+    ]
+
+    for word in notification_sender_words:
+
+        if word in sender_lower:
+
+            return "Notification"
+
+
+    notification_subject_words = [
+
+        "notification",
+        "alert",
+        "receipt",
+        "order confirmation",
+        "password reset",
+        "verification code",
+        "security alert",
+        "account activity",
+        "login alert",
+        "sign-in alert",
+        "payment confirmation",
+        "delivery update",
+        "shipping confirmation"
+
+    ]
+
+    for word in notification_subject_words:
+
+        if word in subject_lower:
+
+            return "Notification"
+
+
+    # -----------------------------------------------------
+    # REPLY NEEDED
+    # -----------------------------------------------------
+
+    reply_words = [
+
+        "let me know",
+        "can you",
+        "could you",
+        "would you",
+        "are you available",
+        "please respond",
+        "please reply",
+        "please let me know",
+        "what do you think",
+        "when are you available",
+        "can we meet",
+        "meeting",
+        "collaboration",
+        "help me",
+        "could we",
+        "would it be possible",
+        "are you free",
+        "can we discuss",
+        "could we discuss",
+        "please send",
+        "please provide",
+        "please confirm",
+        "i wanted to ask",
+        "i'd like to ask",
+        "i would like to ask"
+
+    ]
+
+    for word in reply_words:
+
+        if (
+            word in body_lower
+            or word in subject_lower
+        ):
+
+            return "Reply Needed"
+
+
+    # -----------------------------------------------------
+    # IMPORTANT
+    # -----------------------------------------------------
+
+    important_words = [
+
+        "important",
+        "deadline",
+        "due date",
+        "application",
+        "interview",
+        "exam",
+        "school",
+        "job offer"
+
+    ]
+
+    for word in important_words:
+
+        if word in text:
+
+            return "Important"
+
+
+    # -----------------------------------------------------
+    # NOTHING CONFIDENT
+    # -----------------------------------------------------
+
+    return None
+
+
+# =========================================================
+# CLASSIFIER BACKOFF
+# =========================================================
+
+def set_classifier_backoff(
+    seconds
+):
+
+    global classifier_backoff_until
+
+    if seconds <= 0:
+        seconds = 5
+
+    classifier_backoff_until = max(
+
+        classifier_backoff_until,
+
+        time.time() + seconds
+
+    )
+
+
+def classifier_is_backed_off():
+
+    return (
+        time.time()
+        < classifier_backoff_until
+    )
+
+
+# =========================================================
+# WAIT FOR CLASSIFIER SLOT
+# =========================================================
+
+def wait_for_classifier_slot():
+
+    global last_classifier_call
+
+    with classifier_lock:
+
+        now = time.time()
+
+        if now < classifier_backoff_until:
+
+            return False
+
+        wait_time = (
+
+            CLASSIFIER_MIN_INTERVAL
+
+            - (
+                now
+                - last_classifier_call
+            )
+
+        )
+
+        if wait_time > 0:
+
+            time.sleep(
+                wait_time
+            )
+
+        last_classifier_call = time.time()
+
+        return True
+
+
+# =========================================================
+# EXTRACT RATE LIMIT WAIT TIME
+# =========================================================
+
+def extract_rate_limit_wait(
+    error_text
+):
+
+    patterns = [
+
+        r"try again in ([0-9.]+)s",
+
+        r"retry in ([0-9.]+)s",
+
+        r"after ([0-9.]+)s"
+
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            error_text,
+            re.IGNORECASE
+        )
+
+        if match:
+
+            try:
+
+                return float(
+                    match.group(1)
+                )
+
+            except Exception:
+
+                pass
+
+    return 5.0
+
+
+# =========================================================
+# AI CLASSIFICATION
+# =========================================================
+
+def ai_classify_email(
+    sender,
+    subject,
+    body
+):
+
+    if not groq_client:
+
+        return {
+
+            "classification":
+                "Other",
+
+            "success":
+                False,
+
+            "rate_limited":
+                False
+
+        }
+
+
+    if classifier_is_backed_off():
+
+        print(
+            "CLASSIFIER BACKOFF ACTIVE"
+        )
+
+        return {
+
+            "classification":
+                "Other",
+
+            "success":
+                False,
+
+            "rate_limited":
+                True
+
+        }
+
+
+    prompt = f"""
+Classify this email into EXACTLY ONE category.
+
+Categories:
+Reply Needed
+Important
+Newsletter
+Promotion
+Notification
+Spam
+Other
+
+Reply Needed:
+The sender directly asks, requests, invites,
+proposes, or reasonably expects a response.
+
+Important:
+Significant to the recipient but does not
+clearly require a direct response.
+
+Newsletter:
+Recurring informational content.
+
+Promotion:
+Marketing, advertising, sales, discounts,
+commercial offers, or shopping content.
+
+Notification:
+Automatically generated alerts, receipts,
+confirmations, or system messages.
+
+Spam:
+Suspicious, deceptive, malicious, or unwanted.
+
+Other:
+Anything that does not fit the categories above.
+
+Priority:
+1. Spam
+2. Reply Needed
+3. Important
+4. Promotion
+5. Newsletter
+6. Notification
+7. Other
+
+Sender:
+{sender[:500]}
+
+Subject:
+{subject[:500]}
+
+Body:
+{body[:1800]}
+
+Return ONLY the category name.
+"""
+
+
+    try:
+
+        if not wait_for_classifier_slot():
+
+            return {
+
+                "classification":
+                    "Other",
+
+                "success":
+                    False,
+
+                "rate_limited":
+                    True
+
+            }
+
+
+        completion = (
+
+            groq_client
+            .chat
+            .completions
+            .create(
+
+                model=CLASSIFIER_MODEL,
+
+                messages=[
+
+                    {
+
+                        "role":
+                            "system",
+
+                        "content":
+                            "Return only one exact "
+                            "email category. "
+                            "Do not explain."
+
+                    },
+
+                    {
+
+                        "role":
+                            "user",
+
+                        "content":
+                            prompt
+
+                    }
+
+                ],
+
+                temperature=0,
+
+                max_completion_tokens=20,
+
+                include_reasoning=False
+
+            )
+
+        )
+
+
+        result = (
+
+            completion
+            .choices[0]
+            .message
+            .content
+            .strip()
+            .replace("*", "")
+            .replace("`", "")
+            .strip()
+
+        )
+
+
+        allowed = [
+
+            "Reply Needed",
+            "Important",
+            "Newsletter",
+            "Promotion",
+            "Notification",
+            "Spam",
+            "Other"
+
+        ]
+
+
+        for category in allowed:
+
+            if (
+                result.lower()
+                == category.lower()
+            ):
+
+                return {
+
+                    "classification":
+                        category,
+
+                    "success":
+                        True,
+
+                    "rate_limited":
+                        False
+
+                }
+
+
+        result_lower = result.lower()
+
+        for category in allowed:
+
+            if (
+                category.lower()
+                in result_lower
+            ):
+
+                return {
+
+                    "classification":
+                        category,
+
+                    "success":
+                        True,
+
+                    "rate_limited":
+                        False
+
+                }
+
+
+        print(
+            "UNKNOWN CLASSIFICATION:",
+            result
+        )
+
+        return {
+
+            "classification":
+                "Other",
+
+            "success":
+                False,
+
+            "rate_limited":
+                False
+
+        }
+
+
+    except Exception as e:
+
+        error_text = repr(e)
+
+        print(
+            "CLASSIFIER ERROR:",
+            error_text
+        )
+
+
+        if (
+            "429" in error_text
+            or "rate_limit" in error_text.lower()
+            or "rate limit" in error_text.lower()
+        ):
+
+            wait_seconds = (
+                extract_rate_limit_wait(
+                    error_text
+                )
+            )
+
+            wait_seconds += 1
+
+            set_classifier_backoff(
+                wait_seconds
+            )
+
+            print(
+                "CLASSIFIER RATE LIMITED."
+                f" Backing off for "
+                f"{wait_seconds:.1f}s."
+            )
+
+            return {
+
+                "classification":
+                    "Other",
+
+                "success":
+                    False,
+
+                "rate_limited":
+                    True
+
+            }
+
+
+        return {
+
+            "classification":
+                "Other",
+
+            "success":
+                False,
+
+            "rate_limited":
+                False
+
+        }
+
+
+# =========================================================
+# MAIN CLASSIFICATION PIPELINE
+# =========================================================
+
+def classify_email(
+    session_id,
+    message_id,
+    sender,
+    subject,
+    body,
+    ai_calls_used
+):
+
+    content_hash = (
+        get_email_content_hash(
+            sender,
+            subject,
+            body
+        )
+    )
+
+
+    # -----------------------------------------------------
+    # CACHE
+    # -----------------------------------------------------
+
+    cached = (
+        get_cached_classification(
+            session_id,
+            message_id,
+            content_hash
+        )
+    )
+
+    if cached:
+
+        print(
+            "CLASSIFIER CACHE HIT:",
+            message_id,
+            cached
+        )
+
+        return (
+            cached,
+            ai_calls_used
+        )
+
+
+    # -----------------------------------------------------
+    # DETERMINISTIC CLASSIFICATION
+    # -----------------------------------------------------
+
+    deterministic = (
+        deterministic_classification(
+            sender,
+            subject,
+            body
+        )
+    )
+
+    if deterministic:
+
+        print(
+            "DETERMINISTIC CLASSIFICATION:",
+            message_id,
+            deterministic
+        )
+
+        save_classification(
+            session_id,
+            message_id,
+            content_hash,
+            deterministic
+        )
+
+        return (
+            deterministic,
+            ai_calls_used
+        )
+
+
+    # -----------------------------------------------------
+    # AI BUDGET
+    # -----------------------------------------------------
+
+    if (
+        ai_calls_used
+        >= CLASSIFIER_MAX_AI_CALLS_PER_REFRESH
+    ):
+
+        print(
+            "AI CLASSIFIER LIMIT REACHED:",
+            message_id
+        )
+
+        return (
+            "Other",
+            ai_calls_used
+        )
+
+
+    # -----------------------------------------------------
+    # GLOBAL BACKOFF
+    # -----------------------------------------------------
+
+    if classifier_is_backed_off():
+
+        print(
+            "CLASSIFIER BACKOFF ACTIVE:",
+            message_id
+        )
+
+        return (
+            "Other",
+            ai_calls_used
+        )
+
+
+    # -----------------------------------------------------
+    # AI CLASSIFICATION
+    # -----------------------------------------------------
+
+    ai_result = (
+        ai_classify_email(
+            sender,
+            subject,
+            body
+        )
+    )
+
+    ai_calls_used += 1
+
+    classification = (
+        ai_result["classification"]
+    )
+
+
+    # -----------------------------------------------------
+    # SUCCESS
+    # -----------------------------------------------------
+
+    if ai_result["success"]:
+
+        save_classification(
+            session_id,
+            message_id,
+            content_hash,
+            classification
+        )
+
+        print(
+            "AI CLASSIFICATION:",
+            message_id,
+            classification
+        )
+
+        return (
+            classification,
+            ai_calls_used
+        )
+
+
+    # -----------------------------------------------------
+    # RATE LIMIT
+    # -----------------------------------------------------
+
+    if ai_result["rate_limited"]:
+
+        print(
+            "TEMPORARY CLASSIFICATION FAILURE:",
+            message_id,
+            "NOT CACHED"
+        )
+
+        return (
+            "Other",
+            ai_calls_used
+        )
+
+
+    # -----------------------------------------------------
+    # OTHER FAILURE
+    # -----------------------------------------------------
+
+    print(
+        "AI CLASSIFICATION FAILED:",
+        message_id,
+        "NOT CACHED"
+    )
+
+    return (
+        "Other",
+        ai_calls_used
+    )
+
+
+# =========================================================
+# FILTERED EMAILS
+# =========================================================
+
+@app.get("/gmail/filtered-emails")
+def filtered_emails(
+    request: Request,
+    max_results: int = 20
+):
+
+    service = get_gmail_service(
+        request
+    )
+
+    if not service:
+
+        return {
+
+            "connected":
+                False,
+
+            "emails":
+                []
+
+        }
+
+
+    session_id = get_session_id(
+        request
+    )
+
+    if not session_id:
+
+        return {
+
+            "connected":
+                False,
+
+            "emails":
+                []
+
+        }
+
+
+    try:
+
+        result = (
+
+            service.users()
+            .messages()
+            .list(
+
+                userId="me",
+
+                labelIds=["INBOX"],
+
+                maxResults=max_results
+
+            )
+            .execute()
+
+        )
+
+
+        messages = result.get(
+            "messages",
+            []
+        )
+
+        emails = []
+
+        ai_calls_used = 0
+
+
+        for message in messages:
+
+            try:
+
+                full_message = (
+
+                    service.users()
+                    .messages()
+                    .get(
+
+                        userId="me",
+
+                        id=message["id"],
+
+                        format="full"
+
+                    )
+                    .execute()
+
+                )
+
+
+                payload = (
+                    full_message.get(
+                        "payload",
+                        {}
+                    )
+                )
+
+
+                headers = (
+                    payload.get(
+                        "headers",
+                        []
+                    )
+                )
+
+
+                header_map = {
+
+                    h["name"].lower():
+                        h["value"]
+
+                    for h in headers
+
+                }
+
+
+                sender = (
+                    header_map.get(
+                        "from",
+                        ""
+                    )
+                )
+
+
+                subject = (
+                    header_map.get(
+                        "subject",
+                        "(No subject)"
+                    )
+                )
+
+
+                body = (
+                    extract_email_body(
+                        payload
+                    )
+                )
+
+
+                classification, ai_calls_used = (
+
+                    classify_email(
+
+                        session_id,
+
+                        full_message.get(
+                            "id"
+                        ),
+
+                        sender,
+
+                        subject,
+
+                        body,
+
+                        ai_calls_used
+
+                    )
+
+                )
+
+
+                emails.append({
+
+                    "id":
+                        full_message.get(
+                            "id"
+                        ),
+
+                    "sender":
+                        sender,
+
+                    "from":
+                        sender,
+
+                    "subject":
+                        subject,
+
+                    "snippet":
+                        full_message.get(
+                            "snippet",
+                            ""
+                        ),
+
+                    "classification":
+                        classification,
+
+                    "action":
+                        classification
+
+                })
+
+
+            except Exception as e:
+
+                print(
+                    "FILTER EMAIL ERROR:",
+                    repr(e)
+                )
+
+
+        print(
+            "FILTER COMPLETE:",
+            len(emails),
+            "emails,",
+            ai_calls_used,
+            "AI calls"
+        )
+
+
+        return {
+
+            "connected":
+                True,
+
+            "emails":
+                emails
+
+        }
+
 
     except Exception as e:
 
@@ -1552,143 +2806,216 @@ def filtered_emails(
         )
 
         return {
-            "connected": True,
-            "emails": [],
-            "error": "Failed to load emails."
+
+            "connected":
+                True,
+
+            "emails":
+                [],
+
+            "error":
+                str(e)
+
         }
 
 
 # =========================================================
-# GENERATE EMAIL DRAFT
+# GENERATE DRAFT
 # =========================================================
 
-@app.get("/gmail/draft/{email_id}")
-def generate_email_draft(
-    request: Request,
-    email_id: str
+@app.get("/gmail/draft/{message_id}")
+def generate_draft(
+    message_id: str,
+    request: Request
 ):
 
-    service = get_gmail_service(request)
+    service = get_gmail_service(
+        request
+    )
 
-    if service is None:
+    if not service:
+
         return {
-            "connected": False,
-            "error": "Gmail is not connected"
+
+            "error":
+                "Gmail not connected"
+
         }
 
-    if client is None:
+
+    if not groq_client:
+
         return {
-            "connected": True,
-            "error": "AI service is not configured"
+
+            "error":
+                "Groq API is not configured."
+
         }
 
-    data = service.users().messages().get(
-        userId="me",
-        id=email_id,
-        format="full"
-    ).execute()
-
-    payload = data.get(
-        "payload",
-        {}
-    )
-
-    headers = payload.get(
-        "headers",
-        []
-    )
-
-    sender = ""
-    subject = ""
-
-    for header in headers:
-
-        name = header["name"].lower()
-
-        if name == "from":
-            sender = header["value"]
-
-        elif name == "subject":
-            subject = header["value"]
-
-    body = extract_email_body(
-        payload
-    )
 
     try:
 
-        completion = client.chat.completions.create(
-            model="openai/gpt-oss-120b",
-            messages=[
-                {
-                    "role": "system",
-                    "content": """
-You write email replies for the creator of a portfolio.
+        message = (
 
-Write a natural and helpful reply to the incoming email.
+            service.users()
+            .messages()
+            .get(
 
-Portfolio information:
+                userId="me",
 
-- School Admin Dashboard
-  Built using Replit.
-  A functional administrative login portal and dashboard data interface.
+                id=message_id,
 
-- School Landing Page
-  Built using Visual Studio Code.
-  A clean, fully responsive multi-page website built for a real school.
+                format="full"
 
-- My First AI Chatbox
-  Built using Ziper AI.
-  An AI chatbox providing information about the portfolio and projects.
+            )
+            .execute()
 
-- Custom Python AI Chatbot
-  Built using Python, Streamlit, and Visual Studio Code.
-  A custom portfolio assistant featuring real-time response streaming.
-
-Rules:
-- Answer the actual question.
-- Sound like a real person.
-- Be friendly.
-- Be professional when appropriate.
-- Keep the reply reasonably short.
-- Do not invent information.
-- Do not claim the creator has skills or experience that aren't listed.
-- Do not mention that you are an AI.
-- Do not include a subject line.
-- Return ONLY the email reply.
-"""
-                },
-                {
-                    "role": "user",
-                    "content": f"""
-From:
-{sender}
-
-Subject:
-{subject}
-
-Email:
-{body}
-"""
-                }
-            ],
-            temperature=0.6,
-            max_completion_tokens=500
         )
 
+
+        payload = (
+            message.get(
+                "payload",
+                {}
+            )
+        )
+
+
+        headers = (
+            payload.get(
+                "headers",
+                []
+            )
+        )
+
+
+        header_map = {
+
+            h["name"].lower():
+                h["value"]
+
+            for h in headers
+
+        }
+
+
+        sender = (
+            header_map.get(
+                "from",
+                ""
+            )
+        )
+
+
+        subject = (
+            header_map.get(
+                "subject",
+                ""
+            )
+        )
+
+
+        body = (
+            extract_email_body(
+                payload
+            )
+        )
+
+
+        prompt = f"""
+Write a professional and natural email reply.
+
+Original sender:
+{sender}
+
+Original subject:
+{subject}
+
+Original email:
+{body[:10000]}
+
+Rules:
+
+- Directly respond to the sender's message.
+- Answer questions when possible.
+- Acknowledge requests.
+- Be natural.
+- Be polite.
+- Keep it reasonably concise.
+- Do not invent information.
+- Do not promise things that were not established.
+- Do not include a subject line.
+- Return ONLY the email body.
+"""
+
+
+        completion = (
+
+            groq_client
+            .chat
+            .completions
+            .create(
+
+                model=CHAT_MODEL,
+
+                messages=[
+
+                    {
+
+                        "role":
+                            "system",
+
+                        "content":
+                            SYSTEM_INSTRUCTION
+
+                    },
+
+                    {
+
+                        "role":
+                            "user",
+
+                        "content":
+                            prompt
+
+                    }
+
+                ],
+
+                temperature=0.4
+
+            )
+
+        )
+
+
         draft = (
-            completion.choices[0]
+
+            completion
+            .choices[0]
             .message
             .content
             .strip()
+
         )
 
+
         return {
-            "email_id": email_id,
-            "from": sender,
-            "subject": subject,
-            "draft": draft
+
+            "id":
+                message_id,
+
+            "sender":
+                sender,
+
+            "subject":
+                subject,
+
+            "draft":
+                draft
+
         }
+
 
     except Exception as e:
 
@@ -1698,142 +3025,240 @@ Email:
         )
 
         return {
-            "email_id": email_id,
-            "error": "Failed to generate AI reply."
+
+            "error":
+                str(e)
+
         }
 
 
 # =========================================================
-# SEND GMAIL REPLY
+# SEND EMAIL
 # =========================================================
 
-@app.post("/gmail/send/{email_id}")
-def send_gmail_reply(
+@app.post("/gmail/send/{message_id}")
+def send_email(
+    message_id: str,
     request: Request,
-    email_id: str,
-    email_request: SendEmailRequest
+    data: dict
 ):
 
-    draft = (
-        email_request.body
-        or email_request.draft
-        or ""
+    service = get_gmail_service(
+        request
     )
 
-    if not draft.strip():
+    if not service:
 
         return {
-            "success": False,
-            "message": "Draft cannot be empty."
+
+            "success":
+                False,
+
+            "error":
+                "Gmail not connected"
+
         }
 
-    service = get_gmail_service(request)
-
-    if service is None:
-
-        return {
-            "success": False,
-            "message": "Gmail is not connected."
-        }
 
     try:
 
-        original = service.users().messages().get(
-            userId="me",
-            id=email_id,
-            format="metadata",
-            metadataHeaders=[
-                "From",
-                "Subject"
-            ]
-        ).execute()
+        original = (
 
-        headers = original.get(
-            "payload",
-            {}
-        ).get(
-            "headers",
-            []
+            service.users()
+            .messages()
+            .get(
+
+                userId="me",
+
+                id=message_id,
+
+                format="metadata",
+
+                metadataHeaders=[
+
+                    "From",
+                    "Subject",
+                    "Message-ID"
+
+                ]
+
+            )
+            .execute()
+
         )
 
-        sender = ""
-        subject = ""
 
-        for header in headers:
+        headers = (
 
-            name = header["name"].lower()
+            original
+            .get(
+                "payload",
+                {}
+            )
+            .get(
+                "headers",
+                []
+            )
 
-            if name == "from":
-                sender = header["value"]
+        )
 
-            elif name == "subject":
-                subject = header["value"]
 
-        if not sender:
+        header_map = {
+
+            h["name"].lower():
+                h["value"]
+
+            for h in headers
+
+        }
+
+
+        recipient = (
+            header_map.get(
+                "from",
+                ""
+            )
+        )
+
+
+        subject = (
+            header_map.get(
+                "subject",
+                ""
+            )
+        )
+
+
+        if not subject.lower().startswith(
+            "re:"
+        ):
+
+            subject = (
+                "Re: "
+                + subject
+            )
+
+
+        body = data.get(
+
+            "body",
+
+            data.get(
+                "draft",
+                ""
+            )
+
+        )
+
+
+        if not body.strip():
 
             return {
-                "success": False,
-                "message": "Could not find the sender."
+
+                "success":
+                    False,
+
+                "error":
+                    "Email body is empty."
+
             }
 
-        if not subject.lower().startswith("re:"):
-            subject = f"Re: {subject}"
 
-        html_draft = (
-            draft
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace("\n", "<br>")
+        mime_message = MIMEText(
+
+            body,
+
+            "plain",
+
+            "utf-8"
+
         )
 
-        html_draft = re.sub(
-            r"\*\*(.*?)\*\*",
-            r"<strong>\1</strong>",
-            html_draft
+
+        mime_message["To"] = (
+            recipient
         )
 
-        message = MIMEText(
-            html_draft,
-            "html"
+        mime_message["Subject"] = (
+            subject
         )
 
-        message["To"] = sender
-        message["Subject"] = subject
 
-        encoded_message = base64.urlsafe_b64encode(
-            message.as_bytes()
-        ).decode()
-
-        send_message = {
-            "raw": encoded_message,
-            "threadId": original.get(
+        thread_id = (
+            original.get(
                 "threadId"
             )
+        )
+
+
+        raw_message = (
+
+            base64
+            .urlsafe_b64encode(
+                mime_message.as_bytes()
+            )
+            .decode("utf-8")
+
+        )
+
+
+        send_body = {
+
+            "raw":
+                raw_message
+
         }
 
-        sent = service.users().messages().send(
-            userId="me",
-            body=send_message
-        ).execute()
+
+        if thread_id:
+
+            send_body["threadId"] = (
+                thread_id
+            )
+
+
+        sent = (
+
+            service.users()
+            .messages()
+            .send(
+
+                userId="me",
+
+                body=send_body
+
+            )
+            .execute()
+
+        )
+
 
         return {
-            "success": True,
-            "message": "Reply sent successfully.",
-            "email_id": email_id,
-            "sent_message_id": sent.get("id")
+
+            "success":
+                True,
+
+            "message_id":
+                sent.get("id")
+
         }
+
 
     except Exception as e:
 
         print(
-            "Gmail send error:",
+            "SEND EMAIL ERROR:",
             repr(e)
         )
 
         return {
-            "success": False,
-            "message": "Failed to send the email."
+
+            "success":
+                False,
+
+            "error":
+                str(e)
+
         }
 
 
@@ -1845,24 +3270,44 @@ def send_gmail_reply(
 def health():
 
     return {
-        "status": "healthy",
-        "agent_enabled": agent_enabled
+
+        "status":
+            "healthy"
+
     }
 
 
 # =========================================================
-# DEBUG GOOGLE CONFIG
+# GOOGLE CONFIG DEBUG
 # =========================================================
 
 @app.get("/debug/google-config")
 def debug_google_config():
 
+    client_id = (
+        GOOGLE_CLIENT_ID
+        or ""
+    )
+
     return {
-        "google_client_id_set": bool(
-            GOOGLE_CLIENT_ID
-        ),
-        "google_client_secret_set": bool(
-            GOOGLE_CLIENT_SECRET
-        ),
-        "callback_url": GOOGLE_CALLBACK_URL
+
+        "client_id_loaded":
+            bool(client_id),
+
+        "client_id_length":
+            len(client_id),
+
+        "client_id_ending":
+            client_id[-20:]
+            if client_id
+            else None,
+
+        "secret_loaded":
+            bool(
+                GOOGLE_CLIENT_SECRET
+            ),
+
+        "callback_url":
+            GOOGLE_CALLBACK_URL
+
     }
