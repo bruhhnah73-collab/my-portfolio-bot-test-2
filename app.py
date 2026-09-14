@@ -68,6 +68,41 @@ GROQ_API_KEY = os.getenv(
 DATABASE_URL = os.getenv(
     "DATABASE_URL"
 )
+# =========================================================
+# DATABASE DEBUG
+# =========================================================
+
+if DATABASE_URL:
+
+    from urllib.parse import urlparse
+
+    db_url = urlparse(DATABASE_URL)
+
+    print(
+        "DB DEBUG HOST:",
+        db_url.hostname
+    )
+
+    print(
+        "DB DEBUG PORT:",
+        db_url.port
+    )
+
+    print(
+        "DB DEBUG USER:",
+        db_url.username
+    )
+
+    print(
+        "DB DEBUG DATABASE:",
+        db_url.path
+    )
+
+else:
+
+    print(
+        "DB DEBUG: DATABASE_URL IS MISSING"
+    )
 
 GOOGLE_CLIENT_ID = os.getenv(
     "GOOGLE_CLIENT_ID"
