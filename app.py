@@ -159,7 +159,9 @@ def get_db_connection():
     try:
 
         return psycopg2.connect(
-            DATABASE_URL
+            DATABASE_URL,
+            sslmode="require"
+
         )
 
     except Exception as e:
